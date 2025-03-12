@@ -104,3 +104,6 @@ export const sendMail = async (template: string, recipient: string): Promise<voi
 
     console.log('✅ Email sent successfully:', response.status);
   } catch (error: any) {
+    console.error('❌ Error sending email:', error.response ? error.response.data : error.message);
+  }
+};
