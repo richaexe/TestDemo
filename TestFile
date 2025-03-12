@@ -1,0 +1,97 @@
+import { promises as fs } from 'fs';
+import path from 'path';
+import { ConfidentialClientApplication } from '@azure/msal-node';
+import axios from 'axios';
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+const __dirname = path.resolve(); // Get the root directory
+
+const config = {
+  auth: {
+    clientId: process.env.CLIENT_ID as string,
+    authority: `https://login.microsoftonline.com/${process.env.TENANT_ID}`,
+    clientSecret: process.env.CLIENT_SECRET as string,
+  },
+};
+
+const cca = new ConfidentialClientApplication(config);
+
+async function getToken(): Promise<string | null> {
+  try {
+    const result = await cca.acquireTokenByClientCredential({
+      scopes: ['https://graph.microsoft.com/.default'],
+    });
+    return result.accessToken || null;
+  } catch (error) {
+    console.error('Error acquiring token:', error);
+    return null;
+  }
+}
+
+async function loadTemplate(templateName: string, placeholders: Record<string, string>): Promise<string | null> {
+  try {
+    const templatePath = path.join(__dirname, 'templates', `${templateName}.html`);
+    let templateContent = await fs.readFile(templatePath, 'utf8');
+
+    for (const [key, value] of Object.entries(placeholders)) {
+      const regex = new RegExp(`{{{${key}}}}`, 'g');
+      templateContent = templateContent.replace(regex, value);
+    }
+
+    return templateContent;
+  } catch (error) {
+    console.error('Error loading template:', error);
+    return null;
+  }
+}
+
+export const sendMail = async (template: string, recipient: string): Promise<void> => {
+  const accessToken = await getToken();
+  if (!accessToken) {
+    console.error('No access token available');
+    return;
+  }
+
+  const placeholders = { name: 'User' };
+  const htmlContent = await loadTemplate(template, placeholders);
+
+  if (!htmlContent) {
+    console.error('Email template not loaded');
+    return;
+  }
+
+  const mail = {
+    message: {
+      subject: 'Action Required | Athena Guard',
+      body: {
+        contentType: 'HTML',
+        content: htmlContent,
+      },
+      toRecipients: [
+        {
+          emailAddress: {
+            address: recipient,
+          },
+        },
+      ],
+    },
+  };
+
+  try {
+    const response = await axios.post(
+      `https://graph.microsoft.com/v1.0/users/${process.env.SENDER_MAIL_ID}/sendMail`,
+      mail,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+    console.log('Email sent:', response.status);
+  } catch (error: any) {
+    console.error('Error sending email:', error.response ? error.response.data : error.message);
+  }
+};
