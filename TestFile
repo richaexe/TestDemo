@@ -18,18 +18,31 @@ const config = {
 
 const cca = new ConfidentialClientApplication(config);
 
-async function getToken(): Promise<string | null> {
+/**
+ * Acquires an access token from Microsoft Graph API.
+ * Ensures that a valid token is always returned or throws an error.
+ */
+async function getToken(): Promise<string> {
   try {
     const result = await cca.acquireTokenByClientCredential({
       scopes: ['https://graph.microsoft.com/.default'],
     });
-    return result.accessToken || null;
+
+    if (!result || !result.accessToken) {
+      throw new Error('Failed to acquire access token');
+    }
+
+    return result.accessToken;
   } catch (error) {
     console.error('Error acquiring token:', error);
-    return null;
+    throw new Error('Authentication failed. Unable to retrieve access token.');
   }
 }
 
+/**
+ * Loads an email template and replaces placeholders.
+ * Returns null if the template cannot be loaded.
+ */
 async function loadTemplate(templateName: string, placeholders: Record<string, string>): Promise<string | null> {
   try {
     const templatePath = path.join(__dirname, 'templates', `${templateName}.html`);
@@ -42,44 +55,42 @@ async function loadTemplate(templateName: string, placeholders: Record<string, s
 
     return templateContent;
   } catch (error) {
-    console.error('Error loading template:', error);
+    console.error(`Error loading email template "${templateName}":`, error);
     return null;
   }
 }
 
+/**
+ * Sends an email using Microsoft Graph API.
+ */
 export const sendMail = async (template: string, recipient: string): Promise<void> => {
-  const accessToken = await getToken();
-  if (!accessToken) {
-    console.error('No access token available');
-    return;
-  }
-
-  const placeholders = { name: 'User' };
-  const htmlContent = await loadTemplate(template, placeholders);
-
-  if (!htmlContent) {
-    console.error('Email template not loaded');
-    return;
-  }
-
-  const mail = {
-    message: {
-      subject: 'Action Required | Athena Guard',
-      body: {
-        contentType: 'HTML',
-        content: htmlContent,
-      },
-      toRecipients: [
-        {
-          emailAddress: {
-            address: recipient,
-          },
-        },
-      ],
-    },
-  };
-
   try {
+    const accessToken = await getToken(); // Ensured to always return a valid token
+    const placeholders = { name: 'User' };
+    const htmlContent = await loadTemplate(template, placeholders);
+
+    if (!htmlContent) {
+      console.error('Email template not loaded');
+      return;
+    }
+
+    const mail = {
+      message: {
+        subject: 'Action Required | Athena Guard',
+        body: {
+          contentType: 'HTML',
+          content: htmlContent,
+        },
+        toRecipients: [
+          {
+            emailAddress: {
+              address: recipient,
+            },
+          },
+        ],
+      },
+    };
+
     const response = await axios.post(
       `https://graph.microsoft.com/v1.0/users/${process.env.SENDER_MAIL_ID}/sendMail`,
       mail,
@@ -90,8 +101,6 @@ export const sendMail = async (template: string, recipient: string): Promise<voi
         },
       }
     );
-    console.log('Email sent:', response.status);
+
+    console.log('✅ Email sent successfully:', response.status);
   } catch (error: any) {
-    console.error('Error sending email:', error.response ? error.response.data : error.message);
-  }
-};
