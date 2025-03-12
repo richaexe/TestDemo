@@ -61,18 +61,22 @@ async function loadTemplate(templateName: string, placeholders: Record<string, s
 }
 
 /**
- * Sends an email using Microsoft Graph API with a template.
+ * Sends an email using Microsoft Graph API to multiple recipients.
  */
-export const sendMail = async (template: string, recipient: string, placeholders: Record<string, string>): Promise<void> => {
+export const sendMail = async (template: string, recipients: string[], placeholders: Record<string, string>): Promise<void> => {
   try {
     const accessToken = await getToken(); // Ensured to always return a valid token
-
     const htmlContent = await loadTemplate(template, placeholders);
 
     if (!htmlContent) {
       console.error('Email template not loaded');
       return;
     }
+
+    // Convert the array of recipient emails into the required format
+    const toRecipients = recipients.map(email => ({
+      emailAddress: { address: email },
+    }));
 
     const mail = {
       message: {
@@ -81,13 +85,7 @@ export const sendMail = async (template: string, recipient: string, placeholders
           contentType: 'HTML',
           content: htmlContent,
         },
-        toRecipients: [
-          {
-            emailAddress: {
-              address: recipient,
-            },
-          },
-        ],
+        toRecipients, // Now an array of multiple recipients
       },
     };
 
