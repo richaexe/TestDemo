@@ -1,4 +1,5 @@
 import axios from 'axios';
+import showApiNotification from '../utils/NotificationService';
 import msalInstance, { loginRequest } from '../config/msalConfig';
 
 const api = axios.create({
@@ -13,30 +14,33 @@ let isRefreshing = false;
 let refreshSubscribers = [];
 
 const onRefreshed = (accessToken) => {
-  refreshSubscribers.map((callback) => callback(accessToken));
+  refreshSubscribers.forEach((callback) => callback(accessToken));
 };
 
 const addRefreshSubscriber = (callback) => {
   refreshSubscribers.push(callback);
 };
 
+const handleApiError = (error) => {
+  if (!error.response) {
+    showApiNotification('Network error. Please check your connection.', 'error');
+  } else {
+    const errorMessage = error.response.data?.message || 'An error occurred';
+    showApiNotification(errorMessage, 'error');
+  }
+};
+
 api.interceptors.response.use(
   response => response,
   async error => {
-    const {
-      config,
-      response: { status }
-    } = error;
-
+    const { config, response } = error;
     const originalRequest = config;
-    if (status === 401 && !originalRequest._retry) {
 
+    if (response?.status === 401 && !originalRequest._retry) {
       originalRequest._retry = true;
-      originalRequest._retryCount = (originalRequest._retryCount || 0) + 1;
 
       if (!isRefreshing) {
         isRefreshing = true;
-
         try {
           const accounts = msalInstance.getAllAccounts();
           let newAccessToken;
@@ -46,11 +50,12 @@ api.interceptors.response.use(
               ...loginRequest,
               account: accounts[0],
             });
-            const { accessToken } = response;
-
-            const responseData = await axios.post(`${process.env.REACT_APP_BACKEND_URL}/api/auth/microsoft/refresh`, { token: accessToken }, { withCredentials: true });
-
             newAccessToken = response.accessToken;
+
+            await axios.post(`${process.env.REACT_APP_BACKEND_URL}/api/auth/microsoft/refresh`, 
+              { token: newAccessToken }, 
+              { withCredentials: true }
+            );
           } else {
             const response = await axios.post(`${process.env.REACT_APP_BACKEND_URL}/api/auth/refresh-token`, {}, { withCredentials: true });
             newAccessToken = response.data.accessToken;
@@ -65,16 +70,13 @@ api.interceptors.response.use(
         } catch (tokenRefreshError) {
           isRefreshing = false;
           refreshSubscribers = [];
-          setNotification({
-            isOpen: true,
-            type: 'error',
-            message: 'Session expired. Please log in again.'
-          });
 
+          // 🔥 Notify User on Token Expiry
+          showApiNotification('Session expired. Please log in again.', 'error');
           localStorage.clear();
           sessionStorage.clear();
           window.location.reload();
-          
+
           return Promise.reject(tokenRefreshError);
         }
       }
@@ -87,33 +89,62 @@ api.interceptors.response.use(
       });
     }
 
-    const errorMessage = error.response?.data || 'An error occurred';
-
-    setNotification({
-      isOpen: true,
-      type: 'error',
-      message: errorMessage
-    });
-
-    return Promise.reject(errorMessage);
+    handleApiError(error);
+    return Promise.reject(error);
   }
 );
 
-export const apiRequest = async (method, url, data = null, setNotification) => {
+export const apiRequest = async (method, url, data = null) => {
   try {
     const response = await api({
       method,
       url,
-      data,
+      data
     });
-    
+
+    // 🎉 Show Success Notification
+    showApiNotification('Request successful', 'success');
     return response;
   } catch (error) {
-    setNotification({
-      isOpen: true,
-      type: 'error',
-      message: error.message || 'An unexpected error occurred'
-    });
+    handleApiError(error);
     throw error;
   }
 };
+
+
+
+
+*******************************************************************
+
+
+
+import React from 'react';
+import ReactDOM from 'react-dom';
+import ToastNotification from '../components/ToastNotification';
+
+const showApiNotification = (message, type = 'info') => {
+  const notificationRoot = document.createElement('div');
+  document.body.appendChild(notificationRoot);
+
+  const removeNotification = () => {
+    ReactDOM.unmountComponentAtNode(notificationRoot);
+    document.body.removeChild(notificationRoot);
+  };
+
+  ReactDOM.render(
+    <ToastNotification
+      isOpen={true}
+      type={type}
+      message={message}
+      onClose={removeNotification}
+    />,
+    notificationRoot
+  );
+
+  setTimeout(removeNotification, 3000);
+};
+
+export default showApiNotification;
+
+
+
