@@ -1,113 +1,104 @@
+import Swal from 'sweetalert2';
+import msalInstance, { loginRequest } from '../config/msalConfig';
+import { apiRequest } from '../axios/apiRequest';
 import axios from "axios";
-import Swal from "sweetalert2";
-import msalInstance, { loginRequest } from "../config/msalConfig";
-const api = axios.create({
-  baseURL: process.env.REACT_APP_BACKEND_URL,
-  headers: {
-    "Content-Type": "multipart/form-data",
-  },
-  withCredentials: true,
-});
 
-let isRefreshing = false;
-let refreshSubscribers = [];
-// const MAX_RETRY_COUNT = 1;
-
-const onRefreshed = (accessToken) => {
-  refreshSubscribers.map((callback) => callback(accessToken));
+export const handleSuccessfulLogin = (responseData, dispatch, navigate) => {
+  Swal.fire({
+    icon: 'success',
+    title: responseData.message,
+  });
+  dispatch({ type: 'LOGIN_SUCCESS', payload: responseData.data });
+  navigate('/');
 };
 
-const addRefreshSubscriber = (callback) => {
-  refreshSubscribers.push(callback);
+export const handleUnsuccessfulLogin = () => {
+  localStorage.clear();
+  sessionStorage.clear();
 };
 
-api.interceptors.response.use(
-  (response) => response,
-  async (error) => {
-    const {
-      config,
-      response: { status },
-    } = error;
+export const loginWithMicrosoft = async (dispatch, navigate, setLoading) => {
+  try {
+    setLoading(true);
+    const response = await msalInstance.loginPopup(loginRequest);
+    const { accessToken } = response;
+    
+    console.log("respone of Microfoft is ", response);
+    console.log("Access token is", accessToken);
 
-    const originalRequest = config;
-    if (status === 401 && !originalRequest._retry) {
-      originalRequest._retry = true;
-      originalRequest._retryCount = (originalRequest._retryCount || 0) + 1;
+    const data = { token: accessToken };
 
-      if (!isRefreshing) {
-        isRefreshing = true;
+    const signInUrl = `${process.env.REACT_APP_BACKEND_URL}/api/auth/microsoft/login`;
 
-        try {
-          const accounts = msalInstance.getAllAccounts();
-          let newAccessToken;
 
-          if (accounts.length > 0) {
-            const response = await msalInstance.acquireTokenSilent({
-              ...loginRequest,
-              account: accounts[0],
-            });
-            const { accessToken } = response;
+    const responseData = await axios(signInUrl, {
+      method: "post",
+      data: data,
+      withCredentials: true,
+    });
 
-            const responseData = await axios.post(
-              `${process.env.REACT_APP_BACKEND_URL}/api/auth/microsoft/refresh`,
-              { token: accessToken },
-              { withCredentials: true }
-            );
-
-            newAccessToken = response.accessToken;
-          } else {
-            const response = await axios.post(
-              `${process.env.REACT_APP_BACKEND_URL}/api/auth/refresh`,
-              {},
-              { withCredentials: true }
-            );
-            newAccessToken = response.data.accessToken;
-          }
-
-          isRefreshing = false;
-          onRefreshed(newAccessToken);
-          refreshSubscribers = [];
-
-          originalRequest.headers["Authorization"] = `Bearer ${newAccessToken}`;
-          return api(originalRequest);
-        } catch (tokenRefreshError) {
-          isRefreshing = false;
-          refreshSubscribers = [];
-          Swal.fire({
-            icon: "error",
-            title: "Session expired. Please log in again.",
-          }).then(() => {
-            localStorage.clear();
-            sessionStorage.clear();
-            window.location.reload();
-          });
-          return Promise.reject(tokenRefreshError);
-        }
-      }
-
-      return new Promise((resolve) => {
-        addRefreshSubscriber((newAccessToken) => {
-          originalRequest.headers["Authorization"] = `Bearer ${newAccessToken}`;
-          resolve(api(originalRequest));
-        });
-      });
-    }
-
-    const errorMessage = error.response?.data?.message || "An error occurred";
-    return Promise.reject(errorMessage);
+    handleSuccessfulLogin(responseData.data, dispatch, navigate);
+  } catch (error) {
+    handleUnsuccessfulLogin();
+  } finally {
+    setLoading(false);
   }
-);
+};
 
-export const apiFormRequest = async (method, url, data = null) => {
+export const silentLoginWithMicrosoft = async (instance, accounts, dispatch, navigate) => {
+  try {
+    const response = await instance.acquireTokenSilent({
+      ...loginRequest,
+      account: accounts[0],
+    });
+    const { accessToken } = response;
+
+    const responseData = await apiRequest('POST', '/api/auth/microsoft/login', { token: accessToken });
+    handleSuccessfulLogin(responseData.data, dispatch, navigate);
+  } catch (error) {
+    handleUnsuccessfulLogin();
+  }
+};
+
+export const handleMicrosoftLogout = async (instance, account, dispatch, navigate) => {
+  if (account) {
     try {
-        const config = method === "GET"
-            ? { method, url, params: data } 
-            : { method, url, data}; 
+      await instance.logoutPopup({
+        account: account,
+        postLogoutRedirectUri: `${process.env.REACT_APP_BACKEND_URL}/login`, // Ensure this URI matches your configuration
+      });
 
-        const response = await api(config);
-        return response;
+      localStorage.clear();
+      sessionStorage.clear();
+      dispatch({ type: 'LOGOUT' });
+      window.location.reload();
     } catch (error) {
-        console.error("API Error:", error.response?.data || error.message);
-        throw error.response?.data || error; 
+      console.error('Microsoft logout failed or was canceled', error);
     }
+  } else {
+    dispatch({ type: 'LOGOUT' });
+    window.location.reload();
+  }
+};
+
+
+export const handleLogout = async (setLoading, instance, accounts, dispatch, navigate) => {
+  setLoading(true);
+  try {
+    const result = await apiRequest('POST', "/api/auth/logout", {})
+    if (result.status === 200) {
+      navigate('/login');
+      setTimeout(() => {
+        if (accounts.length > 0) {
+          handleMicrosoftLogout(instance, accounts[0], dispatch, navigate);
+        } else {
+          dispatch({ type: 'LOGOUT' });
+        }
+      }, 50);
+    }
+  } catch (error) {
+    alert("An unexpected error occurred. Please try again later.");
+  } finally {
+    setLoading(false);
+  }
 };
