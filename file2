@@ -3,148 +3,112 @@ import showApiNotification from '../utils/NotificationService';
 import msalInstance, { loginRequest } from '../config/msalConfig';
 
 const api = axios.create({
-  baseURL: process.env.REACT_APP_BACKEND_URL,
-  headers: {
-    "Content-Type": "application/json"
-  },
-  withCredentials: true,
+    baseURL: process.env.REACT_APP_BACKEND_URL,
+    responseType: "blob",
+    headers: {
+        "Content-Type": "application/pdf"
+    },
+    withCredentials: true,
 });
 
 let isRefreshing = false;
 let refreshSubscribers = [];
 
 const onRefreshed = (accessToken) => {
-  refreshSubscribers.forEach((callback) => callback(accessToken));
+    refreshSubscribers.forEach((callback) => callback(accessToken));
 };
 
 const addRefreshSubscriber = (callback) => {
-  refreshSubscribers.push(callback);
+    refreshSubscribers.push(callback);
 };
 
 const handleApiError = (error) => {
-  if (!error.response) {
-    showApiNotification('Network error. Please check your connection.', 'error');
-  } else {
-    const errorMessage = error.response.data?.message || 'An error occurred';
-    showApiNotification(errorMessage, 'error');
-  }
+    if (!error.response) {
+        showApiNotification('Network error. Please check your connection.', 'error');
+    } else {
+        const errorMessage = error.response.data || 'An error occurred';
+        showApiNotification(errorMessage, 'error');
+    }
 };
 
 api.interceptors.response.use(
-  response => response,
-  async error => {
-    const { config, response } = error;
-    const originalRequest = config;
+    response => response,
+    async error => {
+        const { config, response } = error;
+        const originalRequest = config;
 
-    if (response?.status === 401 && !originalRequest._retry) {
-      originalRequest._retry = true;
+        if (response?.status === 401 && !originalRequest._retry) {
+            originalRequest._retry = true;
 
-      if (!isRefreshing) {
-        isRefreshing = true;
-        try {
-          const accounts = msalInstance.getAllAccounts();
-          let newAccessToken;
+            if (!isRefreshing) {
+                isRefreshing = true;
 
-          if (accounts.length > 0) {
-            const response = await msalInstance.acquireTokenSilent({
-              ...loginRequest,
-              account: accounts[0],
+                try {
+                    const accounts = msalInstance.getAllAccounts();
+                    let newAccessToken;
+
+                    if (accounts.length > 0) {
+                        const response = await msalInstance.acquireTokenSilent({
+                            ...loginRequest,
+                            account: accounts[0],
+                        });
+                        newAccessToken = response.accessToken;
+
+                        await axios.post(`${process.env.REACT_APP_BACKEND_URL}/api/auth/microsoft/refresh`, 
+                          { token: newAccessToken }, 
+                          { withCredentials: true }
+                        );
+                    } else {
+                        const response = await axios.post(`${process.env.REACT_APP_BACKEND_URL}/api/auth/refresh-token`, {}, { withCredentials: true });
+                        newAccessToken = response.data.accessToken;
+                    }
+
+                    isRefreshing = false;
+                    onRefreshed(newAccessToken);
+                    refreshSubscribers = [];
+
+                    originalRequest.headers['Authorization'] = `Bearer ${newAccessToken}`;
+                    return api(originalRequest);
+                } catch (tokenRefreshError) {
+                    isRefreshing = false;
+                    refreshSubscribers = [];
+
+                    // 🔥 Notify User on Session Expiry
+                    showApiNotification('Session expired. Please log in again.', 'error');
+                    localStorage.clear();
+                    sessionStorage.clear();
+                    window.location.reload();
+
+                    return Promise.reject(tokenRefreshError);
+                }
+            }
+
+            return new Promise((resolve) => {
+                addRefreshSubscriber((newAccessToken) => {
+                    originalRequest.headers['Authorization'] = `Bearer ${newAccessToken}`;
+                    resolve(api(originalRequest));
+                });
             });
-            newAccessToken = response.accessToken;
-
-            await axios.post(`${process.env.REACT_APP_BACKEND_URL}/api/auth/microsoft/refresh`, 
-              { token: newAccessToken }, 
-              { withCredentials: true }
-            );
-          } else {
-            const response = await axios.post(`${process.env.REACT_APP_BACKEND_URL}/api/auth/refresh-token`, {}, { withCredentials: true });
-            newAccessToken = response.data.accessToken;
-          }
-
-          isRefreshing = false;
-          onRefreshed(newAccessToken);
-          refreshSubscribers = [];
-
-          originalRequest.headers['Authorization'] = `Bearer ${newAccessToken}`;
-          return api(originalRequest);
-        } catch (tokenRefreshError) {
-          isRefreshing = false;
-          refreshSubscribers = [];
-
-          // 🔥 Notify User on Token Expiry
-          showApiNotification('Session expired. Please log in again.', 'error');
-          localStorage.clear();
-          sessionStorage.clear();
-          window.location.reload();
-
-          return Promise.reject(tokenRefreshError);
         }
-      }
 
-      return new Promise((resolve) => {
-        addRefreshSubscriber((newAccessToken) => {
-          originalRequest.headers['Authorization'] = `Bearer ${newAccessToken}`;
-          resolve(api(originalRequest));
-        });
-      });
+        handleApiError(error);
+        return Promise.reject(error);
     }
-
-    handleApiError(error);
-    return Promise.reject(error);
-  }
 );
 
-export const apiRequest = async (method, url, data = null) => {
-  try {
-    const response = await api({
-      method,
-      url,
-      data
-    });
+export const apiBlobRequest = async (method, url, data = null) => {
+    try {
+        const response = await api({
+            method,
+            url,
+            data,
+        });
 
-    // 🎉 Show Success Notification
-    showApiNotification('Request successful', 'success');
-    return response;
-  } catch (error) {
-    handleApiError(error);
-    throw error;
-  }
+        // 🎉 Show Success Notification
+        showApiNotification('Download started successfully', 'success');
+        return response;
+    } catch (error) {
+        handleApiError(error);
+        throw error;
+    }
 };
-
-
-
-
-*******************************************************************
-
-
-
-import React from 'react';
-import ReactDOM from 'react-dom';
-import ToastNotification from '../components/ToastNotification';
-
-const showApiNotification = (message, type = 'info') => {
-  const notificationRoot = document.createElement('div');
-  document.body.appendChild(notificationRoot);
-
-  const removeNotification = () => {
-    ReactDOM.unmountComponentAtNode(notificationRoot);
-    document.body.removeChild(notificationRoot);
-  };
-
-  ReactDOM.render(
-    <ToastNotification
-      isOpen={true}
-      type={type}
-      message={message}
-      onClose={removeNotification}
-    />,
-    notificationRoot
-  );
-
-  setTimeout(removeNotification, 3000);
-};
-
-export default showApiNotification;
-
-
-
