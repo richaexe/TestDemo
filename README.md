@@ -1,0 +1,105 @@
+import axios from 'axios';
+import Swal from 'sweetalert2';
+import msalInstance, { loginRequest } from '../config/msalConfig';
+
+const api = axios.create({
+  baseURL: process.env.REACT_APP_BACKEND_URL,
+  headers: {
+    "Content-Type": "application/json"
+  },
+  withCredentials: true,
+});
+
+let isRefreshing = false;
+let refreshSubscribers = [];
+// const MAX_RETRY_COUNT = 1; // Set maximum retry attempts
+
+const onRefreshed = (accessToken) => {
+  refreshSubscribers.map((callback) => callback(accessToken));
+};
+
+const addRefreshSubscriber = (callback) => {
+  refreshSubscribers.push(callback);
+};
+
+api.interceptors.response.use(
+  response => response,
+  async error => {
+    const {
+      config,
+      response: { status }
+    } = error;
+
+    const originalRequest = config;
+    if (status === 401 && !originalRequest._retry) {
+
+      originalRequest._retry = true;
+      originalRequest._retryCount = (originalRequest._retryCount || 0) + 1;
+
+      if (!isRefreshing) {
+        isRefreshing = true;
+
+        try {
+          const accounts = msalInstance.getAllAccounts();
+          let newAccessToken;
+
+          if (accounts.length > 0) {
+            const response = await msalInstance.acquireTokenSilent({
+              ...loginRequest,
+              account: accounts[0],
+            });
+            const { accessToken } = response;
+
+            const responseData = await axios.post(`${process.env.REACT_APP_BACKEND_URL}/api/auth/microsoft/refresh`, { token: accessToken }, { withCredentials: true });
+
+            newAccessToken = response.accessToken;
+          } else {
+            const response = await axios.post(`${process.env.REACT_APP_BACKEND_URL}/api/auth/refresh-token`, {}, { withCredentials: true });
+            newAccessToken = response.data.accessToken;
+          }
+
+          isRefreshing = false;
+          onRefreshed(newAccessToken);
+          refreshSubscribers = [];
+
+          originalRequest.headers['Authorization'] = `Bearer ${newAccessToken}`;
+          return api(originalRequest);
+        } catch (tokenRefreshError) {
+          isRefreshing = false;
+          refreshSubscribers = [];
+          Swal.fire({
+            icon: 'error',
+            title: 'Session expired. Please log in again.',
+          }).then(() => {
+            localStorage.clear();
+            sessionStorage.clear();
+            window.location.reload();
+          });
+          return Promise.reject(tokenRefreshError);
+        }
+      }
+
+      return new Promise((resolve) => {
+        addRefreshSubscriber((newAccessToken) => {
+          originalRequest.headers['Authorization'] = `Bearer ${newAccessToken}`;
+          resolve(api(originalRequest));
+        });
+      });
+    }
+    const errorMessage = error.response?.data || 'An error occurred';
+    return Promise.reject(errorMessage);
+  }
+);
+
+export const apiRequest = async (method, url, data = null) => {
+  try {
+    const response = await api({
+      method,
+      url,
+      data,
+    });
+    return response;
+  } catch (error) {
+    throw error;
+  }
+};
