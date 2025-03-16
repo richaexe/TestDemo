@@ -1,15 +1,13 @@
-
 import express from "express";
-import { Request, Response, NextFunction } from 'express';
+import { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import path from "path";
 import helmet from "helmet";
 import logger from "./config/logger";
-import { v4 as uuidv4 } from 'uuid';
-import './config/sendEmailJob'
-
-import { dbSync } from "./db/connection";
+import { v4 as uuidv4 } from "uuid";
+import "./config/sendEmailJob";
+import { dbSync, prisma } from "./db/connection"; // Ensure prisma is properly initialized
 import { errorHandler } from "./middleware/error";
 import { CORS_OPTIONS } from "./constants/apiConstants";
 import deserializeUser from "./middleware/deseralizeUser";
@@ -18,42 +16,60 @@ import appRouter from "./routes";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// security and standard middleware
-app.use(helmet({
-  frameguard: { action: 'deny' } // prevents iframe embedding
-}));
+// Security and standard middleware
+app.use(
+  helmet({
+    frameguard: { action: "deny" }, // Prevents iframe embedding
+  })
+);
+
 interface RequestWithTransactionId extends Request {
   transactionId?: string;
 }
 
-app.use((req: RequestWithTransactionId, res: Response, next: Function) => {
+app.use((req: RequestWithTransactionId, res: Response, next: NextFunction) => {
   req.transactionId = uuidv4();
-  logger.info(`Request: ${req.method} ${req.url}`, { transactionId: req.transactionId });
+  logger.info(`Request: ${req.method} ${req.url}`, {
+    transactionId: req.transactionId,
+  });
   next();
 });
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ limit: '10mb', extended: false }));
+
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ limit: "10mb", extended: false }));
 app.use(cors(CORS_OPTIONS));
 app.use(cookieParser());
 
-// auth middleware
+// Auth middleware
 app.use(deserializeUser);
 
-// static file handling
+// Static file handling
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
-// api routes
+// API routes
 app.use("/api", appRouter);
 
-// healt check endpoint
-app.get("/api/", (req, res) => {
-  res.status(200).json({ 
-    msg: "server is up..", 
-    user: (req as any).user || null
-  });
+// Health check endpoint
+app.get("/api/health", async (req: Request, res: Response) => {
+  const healthCheck = {
+    uptime: process.uptime(),
+    timestamp: new Date(),
+    application: "running",
+    database: "pending",
+  };
+
+  // Check Database Connection
+  try {
+    await prisma.$queryRaw`SELECT 1`; // Quick DB check
+    healthCheck.database = "connected";
+  } catch (error) {
+    healthCheck.database = `error: ${(error as Error).message}`;
+  }
+
+  res.status(200).json(healthCheck);
 });
 
-// db sync endpoint
+// DB sync endpoint
 app.patch("/api/sync", async (req, res, next) => {
   try {
     const syncResult = await dbSync();
@@ -63,10 +79,10 @@ app.patch("/api/sync", async (req, res, next) => {
   }
 });
 
-// err handling middleware 
+// Error handling middleware
 app.use(errorHandler);
 
-// start server
+// Start server
 app.listen(PORT, () => {
   logger.info(`Server is running on port ${PORT}`);
   console.log(`Server running on port ${PORT}`);
