@@ -1,1 +1,134 @@
-Hi, I have a project where my frontend is in react and backend is in express and DB as postgre See in my project II also have to take some kind files like pdf or pptx as an input and need to store it , Currently I am using multer and storing it  in a folder along with my code , But since I have to deploy this project on server and day by day the number of pdfs will increase and on sudden if which will make that file folder which is in project be buly and can cause my application slow I wanted to maintain the files somewhere secure and smoothly someone suggest me to use onedrive my It team is also ok to give me space and the required creds for onedrive but I am totally noob how to integrate and what even confug I need to ask and it it good practise to keep the file son onedrive pls suggest me and also if okk gicve me the full intgeration of this whole process also not just uploaidng I alos to fetch the files so that I can disaply the files as per need and even the list the files name so keep in mind all these cenario 
+import axios from "axios";
+import fs from "fs";
+import path from "path";
+import { Client } from "@microsoft/microsoft-graph-client";
+import "isomorphic-fetch";
+import dotenv from "dotenv";
+
+dotenv.config();
+
+const CLIENT_ID = process.env.ONEDRIVE_CLIENT_ID!;
+const CLIENT_SECRET = process.env.ONEDRIVE_CLIENT_SECRET!;
+const TENANT_ID = process.env.ONEDRIVE_TENANT_ID!;
+const REFRESH_TOKEN = process.env.ONEDRIVE_REFRESH_TOKEN!;
+const DRIVE_ID = process.env.ONEDRIVE_DRIVE_ID; // Optional (default is user's OneDrive)
+
+const GRAPH_API_BASE_URL = "https://graph.microsoft.com/v1.0";
+
+const getAccessToken = async (): Promise<string> => {
+  try {
+    const response = await axios.post(
+      `https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token`,
+      new URLSearchParams({
+        client_id: CLIENT_ID,
+        client_secret: CLIENT_SECRET,
+        grant_type: "refresh_token",
+        refresh_token: REFRESH_TOKEN,
+        scope: "https://graph.microsoft.com/.default",
+      }),
+      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+    );
+
+    return response.data.access_token;
+  } catch (error) {
+    console.error("Error fetching access token:", error);
+    throw new Error("Failed to get OneDrive access token.");
+  }
+};
+
+const getGraphClient = async () => {
+  const accessToken = await getAccessToken();
+  return Client.init({
+    authProvider: (done) => {
+      done(null, accessToken);
+    },
+  });
+};
+
+// 📌 Upload File to OneDrive
+export const uploadFileToOneDrive = async (localFilePath: string, entityId: number) => {
+  try {
+    const fileName = path.basename(localFilePath);
+    const accessToken = await getAccessToken();
+    const fileStream = fs.createReadStream(localFilePath);
+
+    const uploadUrl = DRIVE_ID
+      ? `${GRAPH_API_BASE_URL}/drives/${DRIVE_ID}/root:/uploads/${entityId}/${fileName}:/content`
+      : `${GRAPH_API_BASE_URL}/me/drive/root:/uploads/${entityId}/${fileName}:/content`;
+
+    const response = await axios.put(uploadUrl, fileStream, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/octet-stream",
+      },
+    });
+
+    return response.data.id;
+  } catch (error) {
+    console.error("Error uploading file to OneDrive:", error);
+    throw new Error("Failed to upload file.");
+  }
+};
+
+// 📌 Retrieve File from OneDrive (Download URL)
+export const getFileFromOneDrive = async (fileId: string) => {
+  try {
+    const accessToken = await getAccessToken();
+
+    const response = await axios.get(
+      DRIVE_ID
+        ? `${GRAPH_API_BASE_URL}/drives/${DRIVE_ID}/items/${fileId}`
+        : `${GRAPH_API_BASE_URL}/me/drive/items/${fileId}`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }
+    );
+
+    return response.data["@microsoft.graph.downloadUrl"];
+  } catch (error) {
+    console.error("Error retrieving file from OneDrive:", error);
+    throw new Error("Failed to retrieve file.");
+  }
+};
+
+// 📌 List Files in OneDrive
+export const listFilesInOneDrive = async () => {
+  try {
+    const accessToken = await getAccessToken();
+
+    const response = await axios.get(
+      DRIVE_ID
+        ? `${GRAPH_API_BASE_URL}/drives/${DRIVE_ID}/root/children`
+        : `${GRAPH_API_BASE_URL}/me/drive/root/children`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }
+    );
+
+    return response.data.value;
+  } catch (error) {
+    console.error("Error listing OneDrive files:", error);
+    throw new Error("Failed to list files.");
+  }
+};
+
+// 📌 Delete File from OneDrive
+export const deleteFileFromOneDrive = async (fileId: string) => {
+  try {
+    const accessToken = await getAccessToken();
+
+    await axios.delete(
+      DRIVE_ID
+        ? `${GRAPH_API_BASE_URL}/drives/${DRIVE_ID}/items/${fileId}`
+        : `${GRAPH_API_BASE_URL}/me/drive/items/${fileId}`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }
+    );
+
+    return { success: true };
+  } catch (error) {
+    console.error("Error deleting file from OneDrive:", error);
+    throw new Error("Failed to delete file.");
+  }
+};
