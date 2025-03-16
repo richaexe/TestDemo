@@ -7,7 +7,7 @@ import helmet from "helmet";
 import logger from "./config/logger";
 import { v4 as uuidv4 } from "uuid";
 import "./config/sendEmailJob";
-import prisma, { dbSync } from "./db/connection"; // Correct import for Prisma and dbSync
+import prisma, { dbSync } from "./db/connection"; // Correctly import Prisma
 import { errorHandler } from "./middleware/error";
 import { CORS_OPTIONS } from "./constants/apiConstants";
 import deserializeUser from "./middleware/deseralizeUser";
@@ -83,14 +83,7 @@ app.patch("/api/sync", async (req, res, next) => {
 app.use(errorHandler);
 
 // Start server
-app.listen(PORT, async () => {
-  try {
-    await prisma.$connect(); // Ensure DB is connected before starting server
-    logger.info("Database connected!");
-  } catch (error) {
-    logger.error("Database connection failed:", error);
-  }
-  
+app.listen(PORT, () => {
   logger.info(`Server is running on port ${PORT}`);
   console.log(`Server running on port ${PORT}`);
 });
