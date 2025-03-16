@@ -1,123 +1,75 @@
-import { Router } from "express";
-import { EntityType, PrismaClient } from "@prisma/client";
-import { populateDatabase } from "../scripts/populate";
-import { Request, Response } from "express";
-import { uploadDissemination } from "../controllers/admin/adminController";
-import { validateDissemination } from "../validation/user/compliance/uploadDissemination";
-import { addEntitySchema, deleteEntitySchema, deleteFileSchema, getEntitiesFilesSchema, uploadFileSchema } from "../validation/admin";
-import logger from "../config/logger";
-import { uploadFileToOneDrive, deleteFileFromOneDrive, getOneDriveFileLink } from "../services/oneDriveService";
-
-const prisma = new PrismaClient();
-const adminRouter = Router();
-
-adminRouter.post("/add-entity", async (req, res) => {
-  let result = addEntitySchema.safeParse(req.body);
-  if (!result.success) {
-    return res.status(400).json({ error: true, message: result.error.errors[0].message });
-  }
-  logger.info("Adding Entity");
-  const { name, type, year, previousData } = req.body;
-  const parsedType = type?.toUpperCase();
-  const parsedName = name?.toUpperCase();
-  
-  if (!name || typeof name !== "string" || !year || typeof year !== "number" || !parsedType || !Object.values(EntityType).includes(parsedType as EntityType)) {
-    return res.status(400).json({ error: "Invalid entity details." });
-  }
-  
+// Upload File to OneDrive
+adminRouter.post("/upload-file", async (req: Request, res: Response) => {
   try {
-    const existingEntity = await prisma.entity.findUnique({ where: { name_type_year: { name: parsedName, type: parsedType as EntityType, year } } });
-    if (existingEntity) {
-      return res.status(400).json({ error: `Entity with name "${name}" in year "${year}" already exists.` });
+    const { entityId } = req.query;
+    if (!entityId) {
+      return res.status(400).json({ error: "Entity ID is required." });
     }
-    const newEntity = await prisma.entity.create({ data: { name: parsedName, type: parsedType, year, previousRBIData: previousData, previousBCBSData: previousData } });
-    if (!previousData) {
-      await populateDatabase(newEntity.id, "src/scripts/bcbs_data.json", "src/scripts/rbi_data.json");
-    }
-    res.status(201).json({ message: "Entity added successfully.", entity: newEntity });
-  } catch (error) {
-    res.status(500).json({ error: "Failed to add the entity." });
-  }
-});
 
-adminRouter.delete("/delete-entity", async (req, res) => {
-  let result = deleteEntitySchema.safeParse(req.body);
-  if (!result.success) {
-    return res.status(400).json({ error: true, message: result.error.errors[0].message });
-  }
-  const { id } = req.body;
-  try {
-    const entity = await prisma.entity.findUnique({ where: { id: parseInt(id) } });
+    const entity = await prisma.entity.findUnique({ where: { id: Number(entityId) } });
     if (!entity) {
       return res.status(404).json({ error: "Entity not found." });
     }
-    await prisma.entity.delete({ where: { id: parseInt(id) } });
-    res.status(200).json({ message: "Entity deleted successfully." });
-  } catch (error) {
-    res.status(500).json({ error: "Failed to delete entity." });
-  }
-});
 
-adminRouter.post("/upload-file", async (req: Request, res: Response) => {
-  const { entityId } = req.query;
-  if (!entityId) {
-    return res.status(400).json({ error: "Entity ID is required." });
-  }
-  const entity = await prisma.entity.findUnique({ where: { id: Number(entityId) } });
-  if (!entity) {
-    return res.status(404).json({ error: "Entity not found." });
-  }
-  
-  try {
-    const file = req.file;
-    if (!file) {
+    if (!req.file) {
       return res.status(400).json({ error: "No file uploaded." });
     }
-    const oneDriveFile = await uploadFileToOneDrive(file);
-    const savedFile = await prisma.file.create({
+
+    const { originalname, path: localFilePath } = req.file;
+    const fileId = await uploadFileToOneDrive(localFilePath, Number(entityId));
+
+    await prisma.file.create({
       data: {
-        name: file.originalname,
-        path: oneDriveFile.id,
-        mimeType: file.mimetype,
-        size: file.size,
+        name: originalname,
+        path: fileId,
+        mimeType: req.file.mimetype,
+        size: req.file.size,
         entityId: entity.id,
       },
     });
-    res.status(201).json({ message: "File uploaded successfully.", file: savedFile });
+
+    res.status(201).json({ message: "File uploaded successfully." });
   } catch (error) {
+    console.error("Error uploading file:", error);
     res.status(500).json({ error: "Failed to upload file." });
   }
 });
 
+// Get Entities and Files
 adminRouter.get("/get-entities-files", async (req: Request, res: Response) => {
-  let result = getEntitiesFilesSchema.safeParse(req.query);
-  if (!result.success) {
-    return res.status(400).json({ error: true, message: result.error.errors[0].message });
-  }
-  const { entityId } = req.query;
   try {
+    const { entityId, page, pageSize } = req.query;
+    const parsedPage = page ? Number(page) : 1;
+    const parsedPageSize = pageSize ? Number(pageSize) : 10;
+
     if (entityId === "all") {
-      const entitiesWithFiles = await prisma.entity.findMany({ include: { files: true } });
-      res.status(200).json({ entities: entitiesWithFiles });
-    } else {
-      const entityWithFiles = await prisma.entity.findUnique({ where: { id: Number(entityId) }, include: { files: true } });
-      if (!entityWithFiles) {
-        return res.status(404).json({ error: "Entity not found." });
-      }
-      res.status(200).json({ entity: entityWithFiles });
+      const entitiesWithFiles = await prisma.entity.findMany({
+        skip: (parsedPage - 1) * parsedPageSize,
+        take: parsedPageSize,
+        where: { files: { some: {} } },
+        include: { files: true },
+      });
+      const totalEntities = await prisma.entity.count({ where: { files: { some: {} } } });
+      return res.status(200).json({ entities: entitiesWithFiles, total: totalEntities, page: parsedPage, pageSize: parsedPageSize });
     }
+    const entityWithFiles = await prisma.entity.findUnique({ where: { id: Number(entityId) }, include: { files: true } });
+    if (!entityWithFiles) {
+      return res.status(404).json({ error: "Entity not found." });
+    }
+    res.status(200).json({ entities: [entityWithFiles] });
   } catch (error) {
-    res.status(500).json({ error: "Failed to fetch files." });
+    console.error("Error fetching entities and files:", error);
+    res.status(500).json({ error: "Failed to fetch entities and files." });
   }
 });
 
+// Delete File from OneDrive
 adminRouter.delete("/delete-file", async (req: Request, res: Response) => {
-  let result = deleteFileSchema.safeParse(req.query);
-  if (!result.success) {
-    return res.status(400).json({ error: true, message: result.error.errors[0].message });
-  }
-  const { fileId } = req.query;
   try {
+    const { fileId } = req.query;
+    if (!fileId) {
+      return res.status(400).json({ error: "File ID is required." });
+    }
     const file = await prisma.file.findUnique({ where: { id: Number(fileId) } });
     if (!file) {
       return res.status(404).json({ error: "File not found." });
@@ -126,9 +78,7 @@ adminRouter.delete("/delete-file", async (req: Request, res: Response) => {
     await prisma.file.delete({ where: { id: Number(fileId) } });
     res.status(200).json({ message: "File deleted successfully." });
   } catch (error) {
+    console.error("Error deleting file:", error);
     res.status(500).json({ error: "Failed to delete file." });
   }
 });
-
-adminRouter.post("/uploadDissemination", validateDissemination, uploadDissemination);
-export default adminRouter;
