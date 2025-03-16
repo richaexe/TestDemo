@@ -1,84 +1,79 @@
-// Upload File to OneDrive
-adminRouter.post("/upload-file", async (req: Request, res: Response) => {
+import express, { Request, Response } from "express";
+import multer from "multer";
+import fs from "fs";
+import path from "path";
+import { uploadFileToOneDrive, getFilesFromOneDrive, deleteFileFromOneDrive } from "../services/oneDriveService";
+
+export const adminRouter = express.Router();
+
+// Multer Configuration
+const storage = multer.memoryStorage();
+const upload = multer({ storage });
+
+/**
+ * @route POST /upload-file
+ * @desc Uploads a file and stores it in OneDrive
+ */
+adminRouter.post("/upload-file", upload.single("file"), async (req: Request, res: Response) => {
   try {
-    const { entityId } = req.query;
-    if (!entityId) {
-      return res.status(400).json({ error: "Entity ID is required." });
-    }
-
-    const entity = await prisma.entity.findUnique({ where: { id: Number(entityId) } });
-    if (!entity) {
-      return res.status(404).json({ error: "Entity not found." });
-    }
-
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded." });
     }
 
-    const { originalname, path: localFilePath } = req.file;
-    const fileId = await uploadFileToOneDrive(localFilePath, Number(entityId));
+    const { entityId } = req.body;
+    if (!entityId) {
+      return res.status(400).json({ error: "Entity ID is required." });
+    }
 
-    await prisma.file.create({
-      data: {
-        name: originalname,
-        path: fileId,
-        mimeType: req.file.mimetype,
-        size: req.file.size,
-        entityId: entity.id,
-      },
-    });
+    // Temporarily save file
+    const tempFilePath = `./uploads/${req.file.originalname}`;
+    fs.writeFileSync(tempFilePath, req.file.buffer);
 
-    res.status(201).json({ message: "File uploaded successfully." });
-  } catch (error) {
-    console.error("Error uploading file:", error);
-    res.status(500).json({ error: "Failed to upload file." });
+    // Upload to OneDrive
+    const oneDriveFileId = await uploadFileToOneDrive(tempFilePath, Number(entityId));
+    fs.unlinkSync(tempFilePath); // Remove temporary file
+
+    return res.status(201).json({ message: "File uploaded successfully.", oneDriveFileId });
+  } catch (error: any) {
+    console.error("Error uploading file:", error.message);
+    return res.status(500).json({ error: error.message || "Failed to upload file." });
   }
 });
 
-// Get Entities and Files
-adminRouter.get("/get-entities-files", async (req: Request, res: Response) => {
+/**
+ * @route GET /get-entities-files/:entityId
+ * @desc Retrieves the list of files for a given entity
+ */
+adminRouter.get("/get-entities-files/:entityId", async (req: Request, res: Response) => {
   try {
-    const { entityId, page, pageSize } = req.query;
-    const parsedPage = page ? Number(page) : 1;
-    const parsedPageSize = pageSize ? Number(pageSize) : 10;
+    const { entityId } = req.params;
+    if (!entityId) {
+      return res.status(400).json({ error: "Entity ID is required." });
+    }
 
-    if (entityId === "all") {
-      const entitiesWithFiles = await prisma.entity.findMany({
-        skip: (parsedPage - 1) * parsedPageSize,
-        take: parsedPageSize,
-        where: { files: { some: {} } },
-        include: { files: true },
-      });
-      const totalEntities = await prisma.entity.count({ where: { files: { some: {} } } });
-      return res.status(200).json({ entities: entitiesWithFiles, total: totalEntities, page: parsedPage, pageSize: parsedPageSize });
-    }
-    const entityWithFiles = await prisma.entity.findUnique({ where: { id: Number(entityId) }, include: { files: true } });
-    if (!entityWithFiles) {
-      return res.status(404).json({ error: "Entity not found." });
-    }
-    res.status(200).json({ entities: [entityWithFiles] });
-  } catch (error) {
-    console.error("Error fetching entities and files:", error);
-    res.status(500).json({ error: "Failed to fetch entities and files." });
+    const files = await getFilesFromOneDrive(Number(entityId));
+    return res.status(200).json({ files });
+  } catch (error: any) {
+    console.error("Error fetching files:", error.message);
+    return res.status(500).json({ error: error.message || "Failed to fetch files." });
   }
 });
 
-// Delete File from OneDrive
-adminRouter.delete("/delete-file", async (req: Request, res: Response) => {
+/**
+ * @route DELETE /delete-file/:fileId
+ * @desc Deletes a file from OneDrive
+ */
+adminRouter.delete("/delete-file/:fileId", async (req: Request, res: Response) => {
   try {
-    const { fileId } = req.query;
+    const { fileId } = req.params;
     if (!fileId) {
       return res.status(400).json({ error: "File ID is required." });
     }
-    const file = await prisma.file.findUnique({ where: { id: Number(fileId) } });
-    if (!file) {
-      return res.status(404).json({ error: "File not found." });
-    }
-    await deleteFileFromOneDrive(file.path);
-    await prisma.file.delete({ where: { id: Number(fileId) } });
-    res.status(200).json({ message: "File deleted successfully." });
-  } catch (error) {
-    console.error("Error deleting file:", error);
-    res.status(500).json({ error: "Failed to delete file." });
+
+    await deleteFileFromOneDrive(fileId);
+    return res.status(200).json({ message: "File deleted successfully." });
+  } catch (error: any) {
+    console.error("Error deleting file:", error.message);
+    return res.status(500).json({ error: error.message || "Failed to delete file." });
   }
 });
