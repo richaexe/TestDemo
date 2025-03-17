@@ -1,79 +1,68 @@
-import express, { Request, Response } from "express";
-import multer from "multer";
-import fs from "fs";
-import path from "path";
-import { uploadFileToOneDrive, getFilesFromOneDrive, deleteFileFromOneDrive } from "../services/oneDriveService";
+server {
+   listen 80;
+    server_name uat-athenaguard.wcgt.in;
+    location / {
+            return 301 https://$host$request_uri;
+   }
+}
+  server {
+        listen 443 ssl;
+        server_name uat-athenaguard.wcgt.in;
 
-export const adminRouter = express.Router();
+        ssl_certificate /etc/ssl/certs/nginx-selfsigned.crt;
+        ssl_certificate_key /etc/ssl/private/nginx-selfsigned.key;
 
-// Multer Configuration
-const storage = multer.memoryStorage();
-const upload = multer({ storage });
+        ssl_protocols TLSv1.2 TLSv1.3;
+        #ssl_prefer_server_cipher on;
+        ssl_ciphers HIGH:!aNULL:!MDS;
 
-/**
- * @route POST /upload-file
- * @desc Uploads a file and stores it in OneDrive
- */
-adminRouter.post("/upload-file", upload.single("file"), async (req: Request, res: Response) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: "No file uploaded." });
+    location / {
+        root /var/www/frontend;
+        index index.html
+        try_files $uri /index.html
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+}
+     location /static/ {
+        alias /var/www/frontend/static/;
+        autoindex off;
     }
 
-    const { entityId } = req.body;
-    if (!entityId) {
-      return res.status(400).json({ error: "Entity ID is required." });
+    location /api {
+         proxy_pass http://127.0.0.1:3000;
+         proxy_set_header Upgrade $http_upgrade;
+         proxy_set_header Connection 'upgrade';
+         proxy_set_header Host $host;
+         proxy_cache_bypass $http_upgrade;
+         #proxy_set_header Host $host;
+         #proxy_set_header X-Real-IP $remote_addr;
+         #proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+         #proxy_set_header X-Forwarded-Proto $scheme;
+         #proxy_cookie_path / "/; HTTPOnly; Secure";
+         #proxy_pass_header Set-Cookie;
     }
 
-    // Temporarily save file
-    const tempFilePath = `./uploads/${req.file.originalname}`;
-    fs.writeFileSync(tempFilePath, req.file.buffer);
-
-    // Upload to OneDrive
-    const oneDriveFileId = await uploadFileToOneDrive(tempFilePath, Number(entityId));
-    fs.unlinkSync(tempFilePath); // Remove temporary file
-
-    return res.status(201).json({ message: "File uploaded successfully.", oneDriveFileId });
-  } catch (error: any) {
-    console.error("Error uploading file:", error.message);
-    return res.status(500).json({ error: error.message || "Failed to upload file." });
-  }
-});
-
-/**
- * @route GET /get-entities-files/:entityId
- * @desc Retrieves the list of files for a given entity
- */
-adminRouter.get("/get-entities-files/:entityId", async (req: Request, res: Response) => {
-  try {
-    const { entityId } = req.params;
-    if (!entityId) {
-      return res.status(400).json({ error: "Entity ID is required." });
+    location /uploads/ {
+        proxy_pass http://127.0.0.1:3000/uploads/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 
-    const files = await getFilesFromOneDrive(Number(entityId));
-    return res.status(200).json({ files });
-  } catch (error: any) {
-    console.error("Error fetching files:", error.message);
-    return res.status(500).json({ error: error.message || "Failed to fetch files." });
-  }
-});
-
-/**
- * @route DELETE /delete-file/:fileId
- * @desc Deletes a file from OneDrive
- */
-adminRouter.delete("/delete-file/:fileId", async (req: Request, res: Response) => {
-  try {
-    const { fileId } = req.params;
-    if (!fileId) {
-      return res.status(400).json({ error: "File ID is required." });
+    # Proxy for scrapper service
+    location /scrapper/ {
+        proxy_pass http://127.0.0.1:5000/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_cache_bypass $http_upgrade;
     }
 
-    await deleteFileFromOneDrive(fileId);
-    return res.status(200).json({ message: "File deleted successfully." });
-  } catch (error: any) {
-    console.error("Error deleting file:", error.message);
-    return res.status(500).json({ error: error.message || "Failed to delete file." });
-  }
-});
+    # Error pages (optional)
+    error_page 404 /index.html;
+    location = /404.html {
+        root /var/www/frontend;
+    }
+}
