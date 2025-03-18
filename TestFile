@@ -1,19 +1,20 @@
-# Database administrative login by Unix domain socket
-local   all             qaipadmin                              trust
-local   all             postgres                               md5  # Require password for security
+#!/bin/bash
 
-# TYPE  DATABASE        USER            ADDRESS                 METHOD
+DB_NAME="qaip_db"
+DB_USER="qaipadmin"
+BACKUP_DIR="/var/backups/postgresql"
+DATE=$(date +"%Y-%m-%d")
 
-# "local" is for Unix domain socket connections only
-local   all             all                                    md5  # Require password for other users
+# Weekly Full Backup (Only on Sundays)
+if [ $(date +%u) -eq 7 ]; then
+    pg_dump -U $DB_USER -F c -b -v -f "$BACKUP_DIR/full-$DATE.dump" $DB_NAME
+fi
 
-# IPv4 local connections:
-host    all             all             127.0.0.1/32           md5  # Require password
+# Daily Incremental Backup (Only changes)
+pg_basebackup -D "$BACKUP_DIR/incremental-$DATE" -F tar -z -P -h '' -U $DB_USER
 
-# IPv6 local connections:
-host    all             all             ::1/128                scram-sha-256  # Stronger authentication
+# Auto-delete old backups (older than 14 days)
+find $BACKUP_DIR -type f -name "*.dump" -mtime +14 -exec rm {} \;
+find $BACKUP_DIR -type d -name "incremental-*" -mtime +14 -exec rm -rf {} \;
 
-# Allow replication connections from localhost, by a user with the replication privilege.
-local   replication     all                                    md5
-host    replication     all             127.0.0.1/32           scram-sha-256
-host    replication     all             ::1/128                scram-sha-256
+echo "Backup completed on $DATE" >> "$BACKUP_DIR/backup.log"
