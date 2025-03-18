@@ -1,104 +1,20 @@
-import Swal from 'sweetalert2';
-import msalInstance, { loginRequest } from '../config/msalConfig';
-import { apiRequest } from '../axios/apiRequest';
-import axios from "axios";
+#!/bin/bash
 
-export const handleSuccessfulLogin = (responseData, dispatch, navigate) => {
-  Swal.fire({
-    icon: 'success',
-    title: responseData.message,
-  });
-  dispatch({ type: 'LOGIN_SUCCESS', payload: responseData.data });
-  navigate('/');
-};
+DB_NAME="your_database"
+DB_USER="your_user"
+BACKUP_DIR="/var/backups/postgresql"
+DATE=$(date +"%Y-%m-%d")
 
-export const handleUnsuccessfulLogin = () => {
-  localStorage.clear();
-  sessionStorage.clear();
-};
+# Weekly Full Backup (Only on Sundays)
+if [ $(date +%u) -eq 7 ]; then
+    pg_dump -U $DB_USER -F c -b -v -f "$BACKUP_DIR/full-$DATE.dump" $DB_NAME
+fi
 
-export const loginWithMicrosoft = async (dispatch, navigate, setLoading) => {
-  try {
-    setLoading(true);
-    const response = await msalInstance.loginPopup(loginRequest);
-    const { accessToken } = response;
-    
-    console.log("respone of Microfoft is ", response);
-    console.log("Access token is", accessToken);
+# Daily Incremental Backup (Only changes)
+pg_basebackup -D "$BACKUP_DIR/incremental-$DATE" -F tar -z -P -U $DB_USER
 
-    const data = { token: accessToken };
+# Auto-delete old backups (older than 14 days)
+find $BACKUP_DIR -type f -name "*.dump" -mtime +14 -exec rm {} \;
+find $BACKUP_DIR -type d -name "incremental-*" -mtime +14 -exec rm -rf {} \;
 
-    const signInUrl = `${process.env.REACT_APP_BACKEND_URL}/api/auth/microsoft/login`;
-
-
-    const responseData = await axios(signInUrl, {
-      method: "post",
-      data: data,
-      withCredentials: true,
-    });
-
-    handleSuccessfulLogin(responseData.data, dispatch, navigate);
-  } catch (error) {
-    handleUnsuccessfulLogin();
-  } finally {
-    setLoading(false);
-  }
-};
-
-export const silentLoginWithMicrosoft = async (instance, accounts, dispatch, navigate) => {
-  try {
-    const response = await instance.acquireTokenSilent({
-      ...loginRequest,
-      account: accounts[0],
-    });
-    const { accessToken } = response;
-
-    const responseData = await apiRequest('POST', '/api/auth/microsoft/login', { token: accessToken });
-    handleSuccessfulLogin(responseData.data, dispatch, navigate);
-  } catch (error) {
-    handleUnsuccessfulLogin();
-  }
-};
-
-export const handleMicrosoftLogout = async (instance, account, dispatch, navigate) => {
-  if (account) {
-    try {
-      await instance.logoutPopup({
-        account: account,
-        postLogoutRedirectUri: `${process.env.REACT_APP_BACKEND_URL}/login`, // Ensure this URI matches your configuration
-      });
-
-      localStorage.clear();
-      sessionStorage.clear();
-      dispatch({ type: 'LOGOUT' });
-      window.location.reload();
-    } catch (error) {
-      console.error('Microsoft logout failed or was canceled', error);
-    }
-  } else {
-    dispatch({ type: 'LOGOUT' });
-    window.location.reload();
-  }
-};
-
-
-export const handleLogout = async (setLoading, instance, accounts, dispatch, navigate) => {
-  setLoading(true);
-  try {
-    const result = await apiRequest('POST', "/api/auth/logout", {})
-    if (result.status === 200) {
-      navigate('/login');
-      setTimeout(() => {
-        if (accounts.length > 0) {
-          handleMicrosoftLogout(instance, accounts[0], dispatch, navigate);
-        } else {
-          dispatch({ type: 'LOGOUT' });
-        }
-      }, 50);
-    }
-  } catch (error) {
-    alert("An unexpected error occurred. Please try again later.");
-  } finally {
-    setLoading(false);
-  }
-};
+echo "Backup completed on $DATE" >> "$BACKUP_DIR/backup.log"
