@@ -1,20 +1,23 @@
-#!/bin/bash
-
-DB_NAME="qaip_db"
-DB_USER="qaipadmin"
-BACKUP_DIR="/var/backups/postgresql"
-DATE=$(date +"%Y-%m-%d")
-
-# Weekly Full Backup (Only on Sundays)
-if [ $(date +%u) -eq 7 ]; then
-    pg_dump -U $DB_USER -F c -b -v -f "$BACKUP_DIR/full-$DATE.dump" $DB_NAME
-fi
-
-# Daily Incremental Backup (Only changes)
-pg_basebackup -D "$BACKUP_DIR/incremental-$DATE" -F tar -z -P -U $DB_USER
-
-# Auto-delete old backups (older than 14 days)
-find $BACKUP_DIR -type f -name "*.dump" -mtime +14 -exec rm {} \;
-find $BACKUP_DIR -type d -name "incremental-*" -mtime +14 -exec rm -rf {} \;
-
-echo "Backup completed on $DATE" >> "$BACKUP_DIR/backup.log"
+# Edit this file to introduce tasks to be run by cron.
+#
+# Each task to run has to be defined through a single line
+# indicating with different fields when the task will be run
+# and what command to run for the task
+#
+# To define the time you can provide concrete values for
+# minute (m), hour (h), day of month (dom), month (mon),
+# and day of week (dow) or use '*' in these fields (for 'any').
+#
+# Notice that tasks will be started based on the cron's system
+# daemon's notion of time and timezones.
+#
+# Output of the crontab jobs (including errors) is sent through
+# email to the user the crontab file belongs to (unless redirected).
+#
+# For example, you can run a backup of all your user accounts
+# at 5 a.m every week with:
+# 0 5 * * 1 tar -zcf /var/backups/home.tgz /home/
+#
+# For more information see the manual pages of crontab(5) and cron(8)
+#
+# m h  dom mon dow   command
