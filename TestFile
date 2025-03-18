@@ -1,9 +1,12 @@
 #!/bin/bash
 
 DB_NAME="qaip_db"
-DB_USER="qaipadmin"
+DB_USER="postgres"
+DB_PASSWORD="postgres"  # Store password in script (not secure)
 BACKUP_DIR="/var/backups/postgresql"
 DATE=$(date +"%Y-%m-%d")
+
+export PGPASSWORD="$DB_PASSWORD"  # Set password for pg_dump and pg_basebackup
 
 # Weekly Full Backup (Only on Sundays)
 if [ $(date +%u) -eq 7 ]; then
@@ -11,10 +14,12 @@ if [ $(date +%u) -eq 7 ]; then
 fi
 
 # Daily Incremental Backup (Only changes)
-pg_basebackup -D "$BACKUP_DIR/incremental-$DATE" -F tar -z -P -h '' -U $DB_USER
+pg_basebackup -D "$BACKUP_DIR/incremental-$DATE" -F tar -z -P -U $DB_USER
 
 # Auto-delete old backups (older than 14 days)
 find $BACKUP_DIR -type f -name "*.dump" -mtime +14 -exec rm {} \;
 find $BACKUP_DIR -type d -name "incremental-*" -mtime +14 -exec rm -rf {} \;
 
 echo "Backup completed on $DATE" >> "$BACKUP_DIR/backup.log"
+
+unset PGPASSWORD  # Remove password from environment after script execution
