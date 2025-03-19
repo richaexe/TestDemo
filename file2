@@ -1,197 +1,25 @@
-// src/services/user/compliance/dissemination/homeService.ts
+export const applyRoleBasedFilters = (
+  department: string,
+  role: string
+): { AND: any[] } => {
+  const filters: { AND: any[] } = { AND: [] };
+  const fiveDaysAgo = new Date();
+  fiveDaysAgo.setDate(fiveDaysAgo.getDate() - 5);
 
-import { PrismaClient } from "@prisma/client";
-import { applyRoleBasedFilters } from "../../../../helpers/DisseminationHelpers";
-import { HomePageDataResult, CircularInternalType, PaginationState } from "./types";
+  switch (true) {
+    case department === "COMPLIANCE" && role === "MAKER":
+      filters.AND.push({ circularState: "NOT_INITIATED" });
+      break;
 
-const prisma = new PrismaClient();
+    case department === "COMPLIANCE" && role === "CHECKER":
+      filters.AND.push({ circularState: "INITIATED" });
+      break;
 
-export const getHomePageDataService = async (
-    department: string,
-    role: string,
-    isRejected: boolean = false,
-    regulator?: string,
-    page: number = 1,
-    pageSize: number = 5
-  ): Promise<HomePageDataResult> => {
-    try {
-      // all regulators
-      const regulators = await prisma.regulator.findMany({
-        select: {
-          value: true,
-          label: true
-        }
-      });
-      
-      // init circulars and pagination obj
-      let circulars: CircularInternalType[] = [];
-      const pagination: PaginationState = {};
-      
-      // If a specific regulator is requested
-      if (regulator) {
-        // Get count for pagination
-        const count = await prisma.circularsInternal.count({
-          where: {
-            ...(isRejected ? { circularState: "REJECTED" } : applyRoleBasedFilters(department, role)),
-            Circular: {
-              regulator: {
-                equals: regulator,
-                mode: 'insensitive'
-              }
-            }
-          }
-        });
-        
-        // calc pagination
-        const totalPages = Math.ceil(count / pageSize);
-        const skip = (page - 1) * pageSize;
-        
-        // circ with pagination 
-        // @@issue [might be an issue in future]
-        // right now : (any authenticated user irrespective of role or department will be able to see rejected circulars)
-        circulars = await prisma.circularsInternal.findMany({
-          where: {
-            ...(isRejected ? { circularState: "REJECTED" } : applyRoleBasedFilters(department, role)),
-            Circular: {
-              regulator: {
-                equals: regulator,
-                mode: 'insensitive'
-              }
-            }
-          },
-          select: {
-            id: true,
-            financialYear: true,
-            dateOfDissemination: true,
-            regulatorSubDept: true,
-            applicable: true,
-            reasonForNotApplicable: true,
-            applicability: true,
-            gist: true,
-            policyToUpdate: true,
-            toBePlacedToBoardOrCommittee: true,
-            committeeName: true,
-            regulatoryTimelines: true,
-            regulatoryDeadline: true,
-            actionType: true,
-            attachment: true,
-            linkedToEarlierCircular: true,
-            relatedCircularNumbers: true,
-            circularState: true,
-            remarks: true,
-            Circular: {
-              select: {
-                id: true,
-                circularReference: true,
-                circularTitle: true,
-                circularDate: true,
-                regulator: true,
-                circularLink: true,
-              },
-            },
-          },
-          skip,
-          take: pageSize,
-          orderBy: {
-            id: 'desc'
-          }
-        });
-        
-        // pagination for this particular regulator
-        pagination[regulator] = {
-          currentPage: page,
-          totalPages,
-          totalItems: count
-        };
-      } else {
-        // when home page is loaded at first (fetch for all regulators)
-        for (const reg of regulators) {
-          const regValue = reg.value;
-          
-          // Get count for this regulator
-          const count = await prisma.circularsInternal.count({
-            where: {
-              ...(isRejected ? { circularState: "REJECTED" } : applyRoleBasedFilters(department, role)),
-              Circular: {
-                regulator: {
-                  equals: regValue,
-                  mode: 'insensitive'
-                }
-              }
-            }
-          });
-          
-          // only including regulators that have circulars
-          if (count > 0) {
-            // set pagination for this regulator
-            const totalPages = Math.ceil(count / pageSize);
-            pagination[regValue] = {
-              currentPage: 1,
-              totalPages,
-              totalItems: count
-            };
-            
-            //get first page of circulars for this regulator
-            const regulatorCirculars = await prisma.circularsInternal.findMany({
-              where: {
-                ...(isRejected ? { circularState: "REJECTED" } : applyRoleBasedFilters(department, role)),
-                Circular: {
-                  regulator: {
-                    equals: regValue,
-                    mode: 'insensitive'
-                  }
-                }
-              },
-              select: {
-                id: true,
-                financialYear: true,
-                dateOfDissemination: true,
-                regulatorSubDept: true,
-                applicable: true,
-                reasonForNotApplicable: true,
-                applicability: true,
-                gist: true,
-                policyToUpdate: true,
-                toBePlacedToBoardOrCommittee: true,
-                committeeName: true,
-                regulatoryTimelines: true,
-                regulatoryDeadline: true,
-                actionType: true,
-                attachment: true,
-                linkedToEarlierCircular: true,
-                relatedCircularNumbers: true,
-                circularState: true,
-                remarks: true,
-                Circular: {
-                  select: {
-                    id: true,
-                    circularReference: true,
-                    circularTitle: true,
-                    circularDate: true,
-                    regulator: true,
-                    circularLink: true,
-                  },
-                },
-              },
-              take: pageSize,
-              orderBy: {
-                id: 'desc'
-              }
-            });
-            
-            //adding these circulars to the overall result
-            circulars = [...circulars, ...regulatorCirculars];
-          }
-        }
-      }
-  
-      return { 
-        regulators,
-        circulars,
-        pagination
-      };
-    } catch (error: any) {
-      throw new Error(`Error: ${error.message}`);
-    }
-  };
-  
+    default:
+      filters.AND.push(
+        { dateOfDissemination: { gte: fiveDaysAgo } },
+        { circularState: "CLOSURE" }
+      );
+  }
+  return filters;
+};
