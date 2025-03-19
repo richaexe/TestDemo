@@ -1,84 +1,159 @@
-import React, { useCallback, useMemo, useState, lazy, Suspense, useEffect } from 'react';
-import { useNavigate, useLocation, useParams } from 'react-router-dom';
-import { useSelector } from 'react-redux';
-import { getCombinedRole } from '../../utils/roleHelper';
-import { CircularDetails } from './shared/CircularDetails';
-import { apiRequest } from '../../axios/apiRequest';
-import axios from 'axios';
-import LoadingOverlay from '../../loading/loader';
-import ToastNotification from '../../../helpers/ToastNotification';
+import React, { useEffect, useState, useCallback, useMemo, memo } from "react";
+import { useNavigate, useLocation } from "react-router-dom";
+import Pagination from "../pagination/pagination";
+import "../../css/pagination.css";
+import "../../css/home.css";
+import axios from "axios";
+import { apiRequest } from "../axios/apiRequest";
+import AnimatedHeader from "./animatedNotification";
+import LoadingOverlay from "../loading/loader";
+import ToastNotification from "../../helpers/ToastNotification";
 
-// Define a placeholder component to use during loading
-const LoadingView = () => <LoadingOverlay />;
+// ** @@Refer [work item: 302] on azure board for visual represenation of home page implementation **
 
-// Error boundary component
-const ErrorBoundary = ({ children }) => {
-  const [hasError, setHasError] = React.useState(false);
-  const [error, setError] = React.useState(null);
-
-  React.useEffect(() => {
-    const handleError = (error) => {
-      setHasError(true);
-      setError(error);
-      // logging error
-      console.error('Error in Dissemination Page:', error);
-    };
-
-    window.addEventListener('error', handleError);
-    return () => window.removeEventListener('error', handleError);
-  }, []);
-
-  if (hasError) {
-    return (
-      <div className="error-container p-6 bg-red-50 rounded-lg">
-        <h3 className="text-xl text-red-600 mb-2">Something went wrong</h3>
-        <p className="text-gray-700">Please try refreshing the page or contact support if the issue persists.</p>
-        {error && <p className="text-sm text-gray-500 mt-2">{error.toString()}</p>}
-      </div>
-    );
-  }
-
-  return children;
-};
-
-// Lazy load components with a better pattern
-const ComplianceMakerView = lazy(() => {
-  return import('./ComplianceMakerView').catch(err => {
-    console.error("Failed to load ComplianceMakerView:", err);
-    // fallback module 
-    return { default: () => <div>Failed to load Maker View. Please refresh the page.</div> };
-  });
-});
-
-const ComplianceCheckerView = lazy(() => {
-  return import('./ComplianceCheckerView').catch(err => {
-    console.error("Failed to load ComplianceCheckerView:", err);
-    return { default: () => <div>Failed to load Checker View. Please refresh the page.</div> };
-  });
-});
-const ComplianceHodView = lazy(() => {
-  return import('./ComplianceHodView').catch(err => {
-    console.error("Failed to load ComplianceHodView:", err);
-    return { default: () => <div>Failed to load Hod View. Please refresh the page.</div> };
-  });
-});
-
-const DisseminationPage = () => {
+// child memo 
+const CircularRow = memo(({ circular, showToast }) => {
   const navigate = useNavigate();
   const location = useLocation();
-  const params = useParams(); // Use params to get circular ID from URL
-  const [circularData, setCircularData] = useState(null);
-  const [loadingData, setLoadingData] = useState(false);
+  const [isExpanded, setIsExpanded] = useState(false);
+  // useCallback (bcz : call it when the circular changes not on every re-render)
+  const handleShowFile = useCallback(async () => {
+    try {
+      const response = await axios.get(
+        `${process.env.REACT_APP_BACKEND_URL}/api/user/circular/attachment/${circular.attachment}`,
+        { responseType: "blob" }
+      );
+      const fileBlob = new Blob([response.data], {
+        type: response.headers["content-type"],
+      });
+      const fileURL = URL.createObjectURL(fileBlob);
+      window.open(fileURL, "_blank");
+    } catch (error) {
+      showToast("Error loading file", "error");
+    }
+  }, [circular.attachment, showToast]);
+
+  const handleNavigation = useCallback(() => {
+    navigate("/Dissemination", {
+      state: {
+        circular: circular,
+        previousPath: location.pathname,
+      },
+    });
+  }, [circular, location.pathname, navigate]);
+
+  const toggleReadMore = () => {
+    setIsExpanded(!isExpanded);
+  };
+
+  return (
+    <tr>
+      <td>{circular.Circular.id}</td>
+      <td>{circular.Circular.circularReference}</td>
+      <td>{circular.Circular.circularTitle}</td>
+      <td>
+        {isExpanded
+          ? circular.applicability
+          : `${circular.applicability.substring(0, 80)}...`}
+        <button
+          className="read-more-button"
+          onClick={toggleReadMore}
+        >
+          {isExpanded ? "Read Less" : "Read More"}
+        </button>
+      </td>
+
+      <td>
+        {new Date(circular.Circular.circularDate).toLocaleDateString(
+          "en-GB",
+          {
+            day: "2-digit",
+            month: "2-digit",
+            year: "numeric",
+          }
+        )}
+      </td>
+      <td>
+        <button className="home-fetch-button" onClick={handleShowFile}>
+          Show
+        </button>
+      </td>
+      <td>
+        <button className="home-fetch-button" onClick={handleNavigation}>
+          Show
+        </button>
+      </td>
+    </tr>
+  );
+});
+
+// parent memo 
+const CircularsTable = memo(({ title, circulars, pagination, onPageChange, isLoading, showToast }) => {
+  if (!circulars || circulars.length === 0) return null;
+
+  const { currentPage, totalPages } = pagination;
+
+  //caLculated visible pages using the same logic as usePagination hook
+  const pageDisplayLimit = 5;
+  const startPage = Math.max(1, Math.min(
+    currentPage - Math.floor(pageDisplayLimit / 2),
+    totalPages - pageDisplayLimit + 1
+  ));
+
+  const visiblePages = Array.from(
+    { length: Math.min(pageDisplayLimit, totalPages - startPage + 1) },
+    (_, i) => startPage + i
+  );
+
+  return (
+    <div className="">
+      <h2 className="section-title" style={{ fontWeight: "bold" }}>
+        {title} {isLoading && <LoadingOverlay />}
+      </h2>
+      <div className="home-page-table-container">
+        <table className="home-page-table">
+          <thead>
+            <tr>
+              <th>S.No.</th>
+              <th>Reference Number</th>
+              <th>Subject</th>
+              <th>Applicability</th>
+              <th>Date of Issue</th>
+              <th>Show Circular</th>
+              <th>Show Dissemination</th>
+            </tr>
+          </thead>
+          <tbody>
+            {circulars.map((circular, index) => (
+              <CircularRow
+                key={`${circular.id}-${index}`}
+                circular={circular}
+                showToast={showToast}
+              />
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <Pagination
+        currentPage={currentPage}
+        totalPages={totalPages}
+        paginate={onPageChange}
+        nextPages={() => onPageChange(Math.min(currentPage + 1, totalPages))}
+        prevPages={() => onPageChange(Math.max(currentPage - 1, 1))}
+        visiblePages={visiblePages}
+        startPage={startPage}
+      />
+    </div>
+  );
+});
+
+const Home = () => {
+  const location = useLocation();
+  const [circularsData, setCircularsData] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [notification, setNotification] = useState({ isOpen: false, type: '', message: '' });
-
-  // Get circular data from location state if available
-  const stateData = location.state?.circular;
-  const prevpath = location.state?.previousPath;
-  const user = useSelector((state) => state.user.user);
-
-  // Track component loading state
-  const [isLoading, setIsLoading] = useState(false);
+  const [regulators, setRegulators] = useState([]);
+  const [paginationState, setPaginationState] = useState({});
 
   // Toast notification state
   const [toastState, setToastState] = useState({
@@ -87,12 +162,10 @@ const DisseminationPage = () => {
     type: 'success'
   });
 
-  const role = useMemo(() =>
-    user ? getCombinedRole(user.department, user.role) : null,
-    [user]
-  );
+  // for loading the state of a particular regulator
+  const [loadingRegulator, setLoadingRegulator] = useState(null);
 
-  // Function to show toast notifications instead of alerts
+  // Function to show toast notifications
   const showToast = useCallback((message, type = 'success') => {
     setToastState({
       isOpen: true,
@@ -109,278 +182,150 @@ const DisseminationPage = () => {
     }));
   }, []);
 
-  // Fetch circular data if not available in state
-  useEffect(() => {
-    // If we have data from state, use it
-    if (stateData) {
-      setCircularData(stateData);
-      return;
+  const formatRegulatorTitle = useCallback((regulator) => {
+    return regulator
+      .split("-")
+      .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+      .join(" ");
+  }, []);
+
+  // only re-render when path changes : [/home , /home/rejected] ) and 
+  // this fetchData btn tracks pagination seperately for different regulators
+  const fetchData = useCallback(async (regulatorToUpdate = null, page = 1, pageSize = 5) => {
+    if (regulatorToUpdate) {
+      setLoadingRegulator(regulatorToUpdate);
+    } else {
+      setLoading(true);
     }
-
-    const pathParts = location.pathname.split('/');
-    const lastPathPart = pathParts[pathParts.length - 1];
-
-    if (lastPathPart === 'Dissemination' && !params.id) {
-      return;
-    }
-
-    // getting circular ID from URL parameters
-    const circularId = params.id || lastPathPart;
-
-    if (circularId && !isNaN(circularId) && user) {
-      setLoadingData(true);
-      setError(null);
-
-      apiRequest('GET', `${process.env.REACT_APP_BACKEND_URL}/api/user/circular/dissemination/${circularId}`)
-        .then(response => {
-          if (response.data && !response.data.error) {
-            setCircularData(response.data.data);
-          } else {
-            setError(response.data?.msg || 'Failed to load circular data');
-            showToast(response.data?.msg || 'Failed to load circular data', 'error');
-          }
-        })
-        .catch(err => {
-          console.error('Error fetching circular data:', err);
-          setError(err.message || 'Failed to load circular data');
-          showToast(err.message || 'Failed to load circular data', 'error');
-        })
-        .finally(() => {
-          setLoadingData(false);
-        });
-    }
-  }, [stateData, params, location.pathname, user, showToast]);
-
-  const handleSubmit = useCallback(async (event, submissionData = null) => {
-    event.preventDefault();
-
-    if (!circularData?.Circular?.id) {
-      showToast('Cannot submit: Circular data is missing', 'error');
-      return;
-    }
-
-    setIsLoading(true);
-
     try {
-      let updatedData = {};
+      setLoading(regulatorToUpdate ? false : true);
+      const isRejectedRoute = location.pathname === "/home/rejected";
 
-      const isCheckerSubmission = submissionData && 'checkerDecision' in submissionData;
+      let url = `${process.env.REACT_APP_BACKEND_URL}/api/user/home-data`;
 
-      if (isCheckerSubmission) {
-        // handle checker subm
-        const { checkerDecision, checkerRemark } = submissionData;
+      const queryParams = [];
 
-        // validate checker subm
-        if (!checkerDecision) {
-          throw new Error("Checker decision is required");
-        }
-        if (!checkerRemark?.trim()) {
-          throw new Error("Checker remarks are required");
-        }
+      if (isRejectedRoute) {
+        queryParams.push('type=rejected');
+      }
 
-        updatedData = {
-          circularState: checkerDecision,
-          remarks: checkerRemark
-        };
-      } else {
-        // If submissionData is provided directly (as in your maker view)
-        if (submissionData) {
-          updatedData = {
-            ...submissionData,
-            regulatoryDeadline: submissionData.regulatoryDeadline ?
-              new Date(submissionData.regulatoryDeadline) : null,
-            dateOfDissemination: submissionData.dateOfDissemination ?
-              new Date(submissionData.dateOfDissemination) : null
-          };
+      queryParams.push(`page=${page}`);
+      queryParams.push(`pageSize=${pageSize}`);
+
+      // pushing the regulator that needs to be updated
+      if (regulatorToUpdate) {
+        queryParams.push(`regulator=${regulatorToUpdate}`);
+      }
+
+      //ADDDIng query parameters to URL
+      if (queryParams.length > 0) {
+        url += `?${queryParams.join('&')}`;
+      }
+
+      const response = await apiRequest("Get", url);
+
+      if (response.data.success) {
+        const { regulators: regulatorData, circulars: circularData, pagination } = response.data.data;
+
+        // handling init case : load all regulators
+        if (!regulatorToUpdate) {
+          const regulatorsList = regulatorData.map(reg => reg.value);
+          setRegulators(regulatorsList);
+          setCircularsData(circularData);
         } else {
-          // Fallback to FormData handling
-          const formData = new FormData(event.target);
-          const formEntries = Object.fromEntries(formData.entries());
+          setCircularsData(prevCircularsData => {
+            // removing exisging circULAR that is not 
+            const filteredData = prevCircularsData.filter(
+              // we doing this bcz we only want to remove the regulator that needs to be updated (regulatorToUpdate)
+              // ex: regular to update is RBI , remove only the regulator with rbi.. 
+              circular => circular.Circular.regulator.toUpperCase() !== regulatorToUpdate.toUpperCase()
+            );
 
-          // Convert string boolean values to actual booleans
-          for (let key in formEntries) {
-            if (formEntries[key] === 'true') formEntries[key] = true;
-            if (formEntries[key] === 'false') formEntries[key] = false;
-          }
-
-          updatedData = {
-            ...formEntries,
-            applicable: formEntries.applicable === 'Yes' ? 'Applicable' : 'Not Applicable',
-            regulatoryDeadline: formEntries.regulatoryDeadline ?
-              new Date(formEntries.regulatoryDeadline) : null
-          };
+            // merginG with not-removed (filteredData) and circularData (fetched from backend)  
+            return [...filteredData, ...circularData];
+          });
         }
-      }
 
-      // API call
-      await apiRequest(
-        'Patch',
-        `${process.env.REACT_APP_BACKEND_URL}/api/user/circular/updateDissemination/${circularData.Circular.id}`,
-        updatedData
-      );
-      setNotification({
-        isOpen: true,
-        type: 'success',
-        message: "File uploaded successfully!"
-      });
-      // dispatch event for refresh notifications
-      window.dispatchEvent(new Event("refreshNotifications"));
-
-
-
-      // Navigate back to previous page if needed
-      if (prevpath) {
-        navigate(prevpath);
+        setPaginationState(prevPagination => ({
+          ...prevPagination,
+          ...(pagination || {})
+        }));
       }
 
     } catch (error) {
-      // specific submission error
-      const errorMessage = error.message || 'An error occurred while saving. Please try again.';
-      console.error('Submission error:', error);
-      showToast(errorMessage, 'error');
+      console.error('Error fetching data:', error);
+      setError("Failed to fetch data.");
+      showToast("Failed to fetch data", "error");
     } finally {
-      setIsLoading(false);
+      setLoadingRegulator(null);
+      setLoading(false);
     }
-  }, [circularData, prevpath, navigate, showToast]);
+  }, [location.pathname, showToast]);
 
-  const handleShowFile = useCallback(async () => {
-    if (!circularData?.attachment) {
-      showToast('No attachment available', 'warning');
-      return;
-    }
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
 
-    setIsLoading(true);
+  // circularMap returns object [key : value pair]
+  const circularsMap = useMemo(() => {
+    if (!circularsData.length || !regulators.length) return {};
 
-    try {
-      const response = await axios.get(
-        `${process.env.REACT_APP_BACKEND_URL}/api/user/circular/file/${circularData.attachment}`,
-        {
-          responseType: 'blob',
-          // adding cache header since files will not change even if dissemination is updated 
-          headers: {
-            'Cache-Control': 'max-age=3600'
-          }
-        }
+    const newCircularsMap = regulators.reduce((acc, regulator) => {
+      const filteredCirculars = circularsData.filter(
+        (circular) =>
+          circular.Circular.regulator.toUpperCase() === regulator.toUpperCase()
       );
-
-      const fileBlob = new Blob([response.data], {
-        type: response.headers['content-type'],
-      });
-      const fileURL = URL.createObjectURL(fileBlob);
-
-      // open file url in new tab
-      const newWindow = window.open(fileURL, '_blank');
-
-      // clean up the created URL object when window is closed
-      if (newWindow) {
-        newWindow.addEventListener('unload', () => {
-          URL.revokeObjectURL(fileURL);
-        });
+      if (filteredCirculars.length > 0) {
+        acc[regulator] = filteredCirculars;
       }
-    } catch (error) {
-      console.error('File loading error:', error);
-      showToast('Error loading file', 'error');
-    } finally {
-      setIsLoading(false);
-    }
-  }, [circularData, showToast]);
+      return acc;
+    }, {});
 
-  // Helper function to render the correct view based on role
-  const renderContent = useCallback(() => {
-    if (loadingData) {
-      return <LoadingView />;
-    }
+    return newCircularsMap;
+  }, [circularsData, regulators]);
 
-    if (error) {
-      return (
-        <div className="error-container p-6 bg-red-50 rounded-lg">
-          <h3 className="text-xl text-red-600 mb-2">Error Loading Circular</h3>
-          <p className="text-gray-700">{error}</p>
-        </div>
-      );
-    }
+  if (loading) {
+    return <LoadingOverlay />;
+  }
 
-    if (!circularData) {
-      return (
-        <div className="blankpage_container">
-          <div className="message-box">
-            <h1>There is nothing to show right now</h1>
-          </div>
-        </div>
-      );
-    }
+  if (error) {
+    return <div className="error-container">{error}</div>;
+  }
 
-    switch (role) {
-      case 'COMPLIANCE MAKER':
-        return (
-          <ErrorBoundary>
-            <Suspense fallback={<LoadingView />}>
-              <ComplianceMakerView
-                data={circularData}
-                handleSubmit={handleSubmit}
-                handleShowFile={handleShowFile}
-              />
-            </Suspense>
-          </ErrorBoundary>
-        );
-
-      case 'COMPLIANCE CHECKER':
-        return (
-          <ErrorBoundary>
-            <Suspense fallback={<LoadingView />}>
-              <ComplianceCheckerView
-                data={circularData}
-                handleSubmit={handleSubmit}
-                handleShowFile={handleShowFile}
-              />
-            </Suspense>
-          </ErrorBoundary>
-        );
-      case 'COMPLIANCE HOD':
-        return (
-          <ErrorBoundary>
-            <Suspense fallback={<LoadingView />}>
-              <ComplianceHodView
-                data={circularData}
-                handleSubmit={handleSubmit}
-                handleShowFile={handleShowFile}
-              />
-            </Suspense>
-          </ErrorBoundary>
-        );
-
-      default:
-        // View-only mode for other roles page-container
-        return (
-          <div className="">
-            <CircularDetails
-              data={circularData}
-              readonly={true}
-              handleShowFile={handleShowFile}
-            />
-          </div>
-        );
-    }
-  }, [circularData, role, handleSubmit, handleShowFile, loadingData, error]);
+  const handlePageChange = (regulator, page) => {
+    fetchData(regulator, page);
+  };
 
   return (
-    <div className="container relative"
+    <div
+      className="container mx-auto px-4 py-6"
       style={{
         maxWidth: "100%",
         transition: "width 0.3s, margin-left 0.3s",
       }}
     >
-      <h2 className="h2-heading">Dissemination</h2>
-      {isLoading && <LoadingOverlay />}
-      {user ? (
-        renderContent()
-      ) : (
-        <div className="blankpage_container">
-          <div className="message-box">
-            <h1>Please login to continue</h1>
+      <AnimatedHeader showRejected={location.pathname === "/home/rejected"} />
+
+      <div className="space-y-8">
+        {Object.entries(circularsMap).map(([regulator, circulars]) => (
+          <CircularsTable
+            key={regulator}
+            title={formatRegulatorTitle(regulator)}
+            circulars={circulars}
+            pagination={paginationState[regulator] || { currentPage: 1, totalPages: 1 }}
+            onPageChange={(page) => handlePageChange(regulator, page)}
+            isLoading={loadingRegulator === regulator}
+            showToast={showToast}
+          />
+        ))}
+        {Object.keys(circularsMap).length === 0 && (
+          <div className="text-center py-12 bg-gray-50 rounded-lg">
+            <h3 className="text-xl text-gray-600">
+              No circulars available.
+            </h3>
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
       {/* Toast Notification Component */}
       <ToastNotification
@@ -393,4 +338,4 @@ const DisseminationPage = () => {
   );
 };
 
-export default DisseminationPage;
+export default Home;
