@@ -1,25 +1,396 @@
-#!/bin/bash
+import React, { useCallback, useMemo, useState, lazy, Suspense, useEffect } from 'react';
+import { useNavigate, useLocation, useParams } from 'react-router-dom';
+import { useSelector } from 'react-redux';
+import { getCombinedRole } from '../../utils/roleHelper';
+import { CircularDetails } from './shared/CircularDetails';
+import { apiRequest } from '../../axios/apiRequest';
+import axios from 'axios';
+import LoadingOverlay from '../../loading/loader';
+import ToastNotification from '../../../helpers/ToastNotification';
 
-DB_NAME="qaip_db"
-DB_USER="postgres"
-DB_PASSWORD="postgres"  # Store password in script (not secure)
-BACKUP_DIR="/var/backups/postgresql"
-DATE=$(date +"%Y-%m-%d")
+// Define a placeholder component to use during loading
+const LoadingView = () => <LoadingOverlay />;
 
-export PGPASSWORD="$DB_PASSWORD"  # Set password for pg_dump and pg_basebackup
+// Error boundary component
+const ErrorBoundary = ({ children }) => {
+  const [hasError, setHasError] = React.useState(false);
+  const [error, setError] = React.useState(null);
 
-# Weekly Full Backup (Only on Sundays)
-if [ $(date +%u) -eq 7 ]; then
-    pg_dump -U $DB_USER -F c -b -v -f "$BACKUP_DIR/full-$DATE.dump" $DB_NAME
-fi
+  React.useEffect(() => {
+    const handleError = (error) => {
+      setHasError(true);
+      setError(error);
+      // logging error
+      console.error('Error in Dissemination Page:', error);
+    };
 
-# Daily Incremental Backup (Only changes)
-pg_basebackup -D "$BACKUP_DIR/incremental-$DATE" -F tar -z -P -U $DB_USER
+    window.addEventListener('error', handleError);
+    return () => window.removeEventListener('error', handleError);
+  }, []);
 
-# Auto-delete old backups (older than 14 days)
-find $BACKUP_DIR -type f -name "*.dump" -mtime +14 -exec rm {} \;
-find $BACKUP_DIR -type d -name "incremental-*" -mtime +14 -exec rm -rf {} \;
+  if (hasError) {
+    return (
+      <div className="error-container p-6 bg-red-50 rounded-lg">
+        <h3 className="text-xl text-red-600 mb-2">Something went wrong</h3>
+        <p className="text-gray-700">Please try refreshing the page or contact support if the issue persists.</p>
+        {error && <p className="text-sm text-gray-500 mt-2">{error.toString()}</p>}
+      </div>
+    );
+  }
 
-echo "Backup completed on $DATE" >> "$BACKUP_DIR/backup.log"
+  return children;
+};
 
-unset PGPASSWORD  # Remove password from environment after script execution
+// Lazy load components with a better pattern
+const ComplianceMakerView = lazy(() => {
+  return import('./ComplianceMakerView').catch(err => {
+    console.error("Failed to load ComplianceMakerView:", err);
+    // fallback module 
+    return { default: () => <div>Failed to load Maker View. Please refresh the page.</div> };
+  });
+});
+
+const ComplianceCheckerView = lazy(() => {
+  return import('./ComplianceCheckerView').catch(err => {
+    console.error("Failed to load ComplianceCheckerView:", err);
+    return { default: () => <div>Failed to load Checker View. Please refresh the page.</div> };
+  });
+});
+const ComplianceHodView = lazy(() => {
+  return import('./ComplianceHodView').catch(err => {
+    console.error("Failed to load ComplianceHodView:", err);
+    return { default: () => <div>Failed to load Hod View. Please refresh the page.</div> };
+  });
+});
+
+const DisseminationPage = () => {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const params = useParams(); // Use params to get circular ID from URL
+  const [circularData, setCircularData] = useState(null);
+  const [loadingData, setLoadingData] = useState(false);
+  const [error, setError] = useState(null);
+  const [notification, setNotification] = useState({ isOpen: false, type: '', message: '' });
+
+  // Get circular data from location state if available
+  const stateData = location.state?.circular;
+  const prevpath = location.state?.previousPath;
+  const user = useSelector((state) => state.user.user);
+
+  // Track component loading state
+  const [isLoading, setIsLoading] = useState(false);
+
+  // Toast notification state
+  const [toastState, setToastState] = useState({
+    isOpen: false,
+    message: '',
+    type: 'success'
+  });
+
+  const role = useMemo(() =>
+    user ? getCombinedRole(user.department, user.role) : null,
+    [user]
+  );
+
+  // Function to show toast notifications instead of alerts
+  const showToast = useCallback((message, type = 'success') => {
+    setToastState({
+      isOpen: true,
+      message,
+      type
+    });
+  }, []);
+
+  // Function to close toast notification
+  const closeToast = useCallback(() => {
+    setToastState(prev => ({
+      ...prev,
+      isOpen: false
+    }));
+  }, []);
+
+  // Fetch circular data if not available in state
+  useEffect(() => {
+    // If we have data from state, use it
+    if (stateData) {
+      setCircularData(stateData);
+      return;
+    }
+
+    const pathParts = location.pathname.split('/');
+    const lastPathPart = pathParts[pathParts.length - 1];
+
+    if (lastPathPart === 'Dissemination' && !params.id) {
+      return;
+    }
+
+    // getting circular ID from URL parameters
+    const circularId = params.id || lastPathPart;
+
+    if (circularId && !isNaN(circularId) && user) {
+      setLoadingData(true);
+      setError(null);
+
+      apiRequest('GET', `${process.env.REACT_APP_BACKEND_URL}/api/user/circular/dissemination/${circularId}`)
+        .then(response => {
+          if (response.data && !response.data.error) {
+            setCircularData(response.data.data);
+          } else {
+            setError(response.data?.msg || 'Failed to load circular data');
+            showToast(response.data?.msg || 'Failed to load circular data', 'error');
+          }
+        })
+        .catch(err => {
+          console.error('Error fetching circular data:', err);
+          setError(err.message || 'Failed to load circular data');
+          showToast(err.message || 'Failed to load circular data', 'error');
+        })
+        .finally(() => {
+          setLoadingData(false);
+        });
+    }
+  }, [stateData, params, location.pathname, user, showToast]);
+
+  const handleSubmit = useCallback(async (event, submissionData = null) => {
+    event.preventDefault();
+
+    if (!circularData?.Circular?.id) {
+      showToast('Cannot submit: Circular data is missing', 'error');
+      return;
+    }
+
+    setIsLoading(true);
+
+    try {
+      let updatedData = {};
+
+      const isCheckerSubmission = submissionData && 'checkerDecision' in submissionData;
+
+      if (isCheckerSubmission) {
+        // handle checker subm
+        const { checkerDecision, checkerRemark } = submissionData;
+
+        // validate checker subm
+        if (!checkerDecision) {
+          throw new Error("Checker decision is required");
+        }
+        if (!checkerRemark?.trim()) {
+          throw new Error("Checker remarks are required");
+        }
+
+        updatedData = {
+          circularState: checkerDecision,
+          remarks: checkerRemark
+        };
+      } else {
+        // If submissionData is provided directly (as in your maker view)
+        if (submissionData) {
+          updatedData = {
+            ...submissionData,
+            regulatoryDeadline: submissionData.regulatoryDeadline ?
+              new Date(submissionData.regulatoryDeadline) : null,
+            dateOfDissemination: submissionData.dateOfDissemination ?
+              new Date(submissionData.dateOfDissemination) : null
+          };
+        } else {
+          // Fallback to FormData handling
+          const formData = new FormData(event.target);
+          const formEntries = Object.fromEntries(formData.entries());
+
+          // Convert string boolean values to actual booleans
+          for (let key in formEntries) {
+            if (formEntries[key] === 'true') formEntries[key] = true;
+            if (formEntries[key] === 'false') formEntries[key] = false;
+          }
+
+          updatedData = {
+            ...formEntries,
+            applicable: formEntries.applicable === 'Yes' ? 'Applicable' : 'Not Applicable',
+            regulatoryDeadline: formEntries.regulatoryDeadline ?
+              new Date(formEntries.regulatoryDeadline) : null
+          };
+        }
+      }
+
+      // API call
+      await apiRequest(
+        'Patch',
+        `${process.env.REACT_APP_BACKEND_URL}/api/user/circular/updateDissemination/${circularData.Circular.id}`,
+        updatedData
+      );
+      setNotification({
+        isOpen: true,
+        type: 'success',
+        message: "File uploaded successfully!"
+      });
+      // dispatch event for refresh notifications
+      window.dispatchEvent(new Event("refreshNotifications"));
+
+
+
+      // Navigate back to previous page if needed
+      if (prevpath) {
+        navigate(prevpath);
+      }
+
+    } catch (error) {
+      // specific submission error
+      const errorMessage = error.message || 'An error occurred while saving. Please try again.';
+      console.error('Submission error:', error);
+      showToast(errorMessage, 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [circularData, prevpath, navigate, showToast]);
+
+  const handleShowFile = useCallback(async () => {
+    if (!circularData?.attachment) {
+      showToast('No attachment available', 'warning');
+      return;
+    }
+
+    setIsLoading(true);
+
+    try {
+      const response = await axios.get(
+        `${process.env.REACT_APP_BACKEND_URL}/api/user/circular/file/${circularData.attachment}`,
+        {
+          responseType: 'blob',
+          // adding cache header since files will not change even if dissemination is updated 
+          headers: {
+            'Cache-Control': 'max-age=3600'
+          }
+        }
+      );
+
+      const fileBlob = new Blob([response.data], {
+        type: response.headers['content-type'],
+      });
+      const fileURL = URL.createObjectURL(fileBlob);
+
+      // open file url in new tab
+      const newWindow = window.open(fileURL, '_blank');
+
+      // clean up the created URL object when window is closed
+      if (newWindow) {
+        newWindow.addEventListener('unload', () => {
+          URL.revokeObjectURL(fileURL);
+        });
+      }
+    } catch (error) {
+      console.error('File loading error:', error);
+      showToast('Error loading file', 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [circularData, showToast]);
+
+  // Helper function to render the correct view based on role
+  const renderContent = useCallback(() => {
+    if (loadingData) {
+      return <LoadingView />;
+    }
+
+    if (error) {
+      return (
+        <div className="error-container p-6 bg-red-50 rounded-lg">
+          <h3 className="text-xl text-red-600 mb-2">Error Loading Circular</h3>
+          <p className="text-gray-700">{error}</p>
+        </div>
+      );
+    }
+
+    if (!circularData) {
+      return (
+        <div className="blankpage_container">
+          <div className="message-box">
+            <h1>There is nothing to show right now</h1>
+          </div>
+        </div>
+      );
+    }
+
+    switch (role) {
+      case 'COMPLIANCE MAKER':
+        return (
+          <ErrorBoundary>
+            <Suspense fallback={<LoadingView />}>
+              <ComplianceMakerView
+                data={circularData}
+                handleSubmit={handleSubmit}
+                handleShowFile={handleShowFile}
+              />
+            </Suspense>
+          </ErrorBoundary>
+        );
+
+      case 'COMPLIANCE CHECKER':
+        return (
+          <ErrorBoundary>
+            <Suspense fallback={<LoadingView />}>
+              <ComplianceCheckerView
+                data={circularData}
+                handleSubmit={handleSubmit}
+                handleShowFile={handleShowFile}
+              />
+            </Suspense>
+          </ErrorBoundary>
+        );
+      case 'COMPLIANCE HOD':
+        return (
+          <ErrorBoundary>
+            <Suspense fallback={<LoadingView />}>
+              <ComplianceHodView
+                data={circularData}
+                handleSubmit={handleSubmit}
+                handleShowFile={handleShowFile}
+              />
+            </Suspense>
+          </ErrorBoundary>
+        );
+
+      default:
+        // View-only mode for other roles page-container
+        return (
+          <div className="">
+            <CircularDetails
+              data={circularData}
+              readonly={true}
+              handleShowFile={handleShowFile}
+            />
+          </div>
+        );
+    }
+  }, [circularData, role, handleSubmit, handleShowFile, loadingData, error]);
+
+  return (
+    <div className="container relative"
+      style={{
+        maxWidth: "100%",
+        transition: "width 0.3s, margin-left 0.3s",
+      }}
+    >
+      <h2 className="h2-heading">Dissemination</h2>
+      {isLoading && <LoadingOverlay />}
+      {user ? (
+        renderContent()
+      ) : (
+        <div className="blankpage_container">
+          <div className="message-box">
+            <h1>Please login to continue</h1>
+          </div>
+        </div>
+      )}
+
+      {/* Toast Notification Component */}
+      <ToastNotification
+        type={toastState.type}
+        message={toastState.message}
+        isOpen={toastState.isOpen}
+        onClose={closeToast}
+      />
+    </div>
+  );
+};
+
+export default DisseminationPage;
