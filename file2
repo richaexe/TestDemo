@@ -1,25 +1,19 @@
-export const applyRoleBasedFilters = (
-  department: string,
-  role: string
-): { AND: any[] } => {
-  const filters: { AND: any[] } = { AND: [] };
-  const fiveDaysAgo = new Date();
-  fiveDaysAgo.setDate(fiveDaysAgo.getDate() - 5);
-
-  switch (true) {
-    case department === "COMPLIANCE" && role === "MAKER":
-      filters.AND.push({ circularState: "NOT_INITIATED" });
-      break;
-
-    case department === "COMPLIANCE" && role === "CHECKER":
-      filters.AND.push({ circularState: "INITIATED" });
-      break;
-
-    default:
-      filters.AND.push(
-        { dateOfDissemination: { gte: fiveDaysAgo } },
-        { circularState: "CLOSURE" }
-      );
-  }
-  return filters;
-};
+<div className="diss_repo_filter_group">
+                        <label htmlFor="circularStateFilter" className="diss_repo_filter_label">Circular State</label>
+                        <select
+                            id="circularStateFilter"
+                            value={filterCircularState}
+                            onChange={(e) => setFilterCircularState(e.target.value)}
+                            className={`diss_repo_select ${!filterCircularState ? 'placeholder' : ''}`}
+                        >
+                            <option value="">All States</option>
+                            {CircularStateOptions.map((option) => (
+                                <option key={option} value={option}>
+                                    {option === "NOT_INITIATED" ? "Not Initiated" :
+                                        option === "INITIATED" ? "Initiated" :
+                                            option === "REJECTED" ? "Rejected" :
+                                                option === "CLOSURE" ? "Closure" : option}
+                                </option>
+                            ))}
+                        </select>
+                    </div>
