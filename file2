@@ -1,68 +1,19 @@
-server {
-   listen 80;
-    server_name uat-athenaguard.wcgt.in;
-    location / {
-            return 301 https://$host$request_uri;
-   }
-}
-  server {
-        listen 443 ssl;
-        server_name uat-athenaguard.wcgt.in;
+useEffect(() => {
+    // ✅ Show toast if redirected with a success message
+    if (location.state?.toastMessage) {
+      showToast(location.state.toastMessage, location.state.toastType);
 
-        ssl_certificate /etc/ssl/certs/nginx-selfsigned.crt;
-        ssl_certificate_key /etc/ssl/private/nginx-selfsigned.key;
-
-        ssl_protocols TLSv1.2 TLSv1.3;
-        #ssl_prefer_server_cipher on;
-        ssl_ciphers HIGH:!aNULL:!MDS;
-
-    location / {
-        root /var/www/frontend;
-        index index.html
-        try_files $uri /index.html
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
-}
-     location /static/ {
-        alias /var/www/frontend/static/;
-        autoindex off;
+      // ✅ Clear the state to prevent duplicate toasts on refresh
+      navigate(location.pathname, { replace: true, state: {} });
     }
+  }, [location, navigate]);
 
-    location /api {
-         proxy_pass http://127.0.0.1:3000;
-         proxy_set_header Upgrade $http_upgrade;
-         proxy_set_header Connection 'upgrade';
-         proxy_set_header Host $host;
-         proxy_cache_bypass $http_upgrade;
-         #proxy_set_header Host $host;
-         #proxy_set_header X-Real-IP $remote_addr;
-         #proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-         #proxy_set_header X-Forwarded-Proto $scheme;
-         #proxy_cookie_path / "/; HTTPOnly; Secure";
-         #proxy_pass_header Set-Cookie;
-    }
 
-    location /uploads/ {
-        proxy_pass http://127.0.0.1:3000/uploads/;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    }
-
-    # Proxy for scrapper service
-    location /scrapper/ {
-        proxy_pass http://127.0.0.1:5000/;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_cache_bypass $http_upgrade;
-    }
-
-    # Error pages (optional)
-    error_page 404 /index.html;
-    location = /404.html {
-        root /var/www/frontend;
-    }
-}
+if (response.data.success) {
+        // ✅ Store toast message in location.state before navigating
+        navigate("/home", {
+          state: { toastMessage: "Circular updated successfully!", toastType: "success" }
+        });
+      } else {
+        showToast("Failed to update circular", "error");
+      }
