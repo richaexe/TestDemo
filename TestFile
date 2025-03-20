@@ -1,443 +1,222 @@
-// useDissemination.jsx
-import { useState, useCallback, useRef, useEffect } from 'react';
-import { DISSEMINATION_URL, columnTitles } from  '../../../constants/dissemination';
-import { processExcelData, formatFieldValue, cleanFieldName, debounce } from './disseminationUtils';
-import { apiFormRequest } from '../../axios/apiFormRequest';
+import express, { Request, Response } from "express";
+import multer, { StorageEngine } from "multer";
+import fs from "fs";
+import path from "path";
+import { PrismaClient } from "@prisma/client";
 
-export const useDissemination = (fileInputRef) => {
-  const [disseminations, setDisseminations] = useState([]);
-  const [notification, setNotification] = useState({
-    isOpen: false,
-    type: 'success',
-    message: ''
-  });
-  const [fixedFields, setFixedFields] = useState({});
-  const [regulatorOptions, setRegulatorOptions] = useState([
-    { value: "", label: "Select" },
-    { value: "Custom", label: "Custom" }
-  ]);
-  const [loading, setLoading] = useState(false);
-  const [attachmentFiles, setAttachmentFiles] = useState({});
-  const [validationErrors, setValidationErrors] = useState([]);
-  
-  // Create a ref to store the debounced search function
-  const debouncedSearchRef = useRef(null);
+const prisma = new PrismaClient();
+const adminRouter = express.Router();
 
-  // Setup the debounced search function
-  useEffect(() => {
-    // Create a new debounced function and store it in the ref
-    debouncedSearchRef.current = debounce(async (index, field, value) => {
-      setDisseminations(prev => {
-        const updated = [...prev];
-        updated[index] = {
-          ...updated[index],
-          [field]: value,
-          searchedResult: updated[index].searchedResult || []
-        };
-        return updated;
-      });
+const UPLOADS_DIR = "/var/www/uploads";
 
-      if (value.length >= 2) {
-        try {
-          const response = await apiFormRequest(
-            "GET",
-            `${process.env.REACT_APP_BACKEND_URL}/api/user/circular/dissemination/linkedWithearlierCircular`,
-            { title: value }
-          );
+if (!fs.existsSync(UPLOADS_DIR)) {
+  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+}
 
-          if (response.data && !response.data.error) {
-            setDisseminations(prev => {
-              const updated = [...prev];
-              updated[index] = {
-                ...updated[index],
-                searchedResult: response.data.data || []
-              };
-              return updated;
-            });
-          }
-        } catch (error) {
-          console.error('Search error:', error);
-          setDisseminations(prev => {
-            const updated = [...prev];
-            updated[index] = {
-              ...updated[index],
-              searchedResult: []
-            };
-            return updated;
-          });
+const storage: StorageEngine = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, UPLOADS_DIR);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = `${Date.now()}`;
+    cb(null, `${uniqueSuffix}-${file.originalname}`);
+  },
+});
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowedMimeTypes = [
+      "application/pdf",
+      "application/vnd.ms-powerpoint",
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ];
+    if (allowedMimeTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error("Invalid file type. Only PDF and PPT files are allowed."));
+    }
+  },
+});
+
+adminRouter.post(
+  "/upload-file",
+  upload.single("file"),
+  async (req: Request, res: Response) => {
+    const deleteUploadedFile = (filePath: string) => {
+      try {
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
         }
-      } else {
-        setDisseminations(prev => {
-          const updated = [...prev];
-          updated[index] = {
-            ...updated[index],
-            searchedResult: []
-          };
-          return updated;
-        });
-      }
-    }, 300);
-
-    // Cleanup function
-    return () => {
-      if (debouncedSearchRef.current && debouncedSearchRef.current.cancel) {
-        debouncedSearchRef.current.cancel();
+      } catch (error) {
+        console.error("Error deleting uploaded file:", error);
       }
     };
-  }, []);
-
-  // Create a stable wrapper that calls the current debounced function
-  const handleSearchChange = useCallback((index, field, value) => {
-    if (debouncedSearchRef.current) {
-      debouncedSearchRef.current(index, field, value);
-    }
-  }, []);
-
-  const handleUploadFile = async (event) => {
-    const file = event.target.files[0];
-    if (!file) return;
 
     try {
-      const cleanData = await processExcelData(file);
-      
-      const fieldMapping = {
-        'Circular Reference': 'circularReference',
-        'Regulator': 'regulator',
-        'Circular Title': 'circularTitle',
-        'Circular Date': 'circularDate',
-        'Applicable': 'applicable',
-        'Regulator Sub Department': 'regulatorSubDepartment',
-        'Applicability': 'applicability',
-        'Financial Year': 'financialYear',
-        'Gist': 'gist',
-        'Policy to Update': 'policyToUpdate',
-        'Regulatory Timelines': 'regulatoryTimelines',
-        'Regulatory Deadline': 'regulatoryDeadline',
-        'Action Type': 'actionType',
-        'Circular Website Link': 'circularWebsiteLink',
-        'Linked to Earlier Circular': 'linkedToEarlierCircular',
-      };
+      const { entityId } = req.query;
 
-      const mappedData = {
-        relatedCircularNumbers: [],
-        searchedResult: [],
-        searchTerm: "",
-        customRegulator: "",
-        linkedToEarlierCircular: "NO"  // Default value
-      };
-
-      // Handle regulator mapping
-      const regulatorRow = cleanData.find(row => cleanFieldName(row[0]) === 'Regulator');
-      if (regulatorRow && regulatorRow[1]) {
-        const regulatorValue = regulatorRow[1].toString().trim();
-        const regulatorExists = regulatorOptions.some(
-          option => option.value !== '' && option.value !== 'Custom' && 
-          option.value.toLowerCase() === regulatorValue.toLowerCase()
-        );
-
-        if (regulatorExists) {
-          mappedData.regulator = regulatorValue;
-        } else {
-          mappedData.regulator = regulatorValue;
-          mappedData.customRegulator = 'Custom';
+      if (!entityId) {
+        if (req.file) {
+          deleteUploadedFile(path.join(UPLOADS_DIR, req.file.filename));
         }
+        return res.status(400).json({ error: "Entity ID is required." });
       }
 
-      // Process other fields
-      cleanData.forEach(row => {
-        if (row.length >= 2) {
-          const excelField = cleanFieldName(row[0] || '');
-          const value = row[1]?.toString().trim();
-          const mappedField = fieldMapping[excelField];
-
-          if (mappedField && mappedField !== 'regulator') {
-            const formattedValue = formatFieldValue(mappedField, value);
-            mappedData[mappedField] = formattedValue;
-
-            // If this is linkedToEarlierCircular, initialize the arrays based on the value
-            if (mappedField === 'linkedToEarlierCircular') {
-              if (formattedValue === 'YES') {
-                mappedData.relatedCircularNumbers = [];
-                mappedData.searchedResult = [];
-                mappedData.searchTerm = '';
-              }
-            }
-          }
+      const entity = await prisma.entity.findUnique({ where: { id: Number(entityId) } });
+      if (!entity) {
+        if (req.file) {
+          deleteUploadedFile(path.join(UPLOADS_DIR, req.file.filename));
         }
-      });
+        return res.status(404).json({ error: "Entity not found." });
+      }
 
-      setDisseminations(prev => [...prev, mappedData]);
+      const existingFile = await prisma.file.findFirst({ where: { entityId: entity.id } });
+      if (existingFile) {
+        if (req.file) {
+          deleteUploadedFile(path.join(UPLOADS_DIR, req.file.filename));
+        }
+        return res.status(400).json({
+          error: `The entity already has an associated file: "${existingFile.name}". Delete the existing file to upload a new one.`,
+        });
+      }
+
+      if (!req.file) {
+        return res.status(400).json({ error: "No file uploaded." });
+      }
+
+      const { originalname, filename, mimetype, size } = req.file;
+      const filePath = path.join(UPLOADS_DIR, filename);
+
+      try {
+        const file = await prisma.file.create({
+          data: {
+            name: originalname,
+            path: filePath,
+            mimeType: mimetype,
+            size,
+            entityId: entity.id,
+          },
+        });
+
+        return res.status(201).json({ message: "File uploaded successfully.", file });
+      } catch (dbError) {
+        console.error("Error saving file to database:", dbError);
+        deleteUploadedFile(filePath);
+        return res.status(500).json({ error: "Failed to save the file to the database." });
+      }
     } catch (error) {
-      console.error('Error processing file:', error);
-      // setError('Error processing the Excel file. Please check the format.');
-      setNotification({
-        isOpen: true,
-        type: 'error',
-        message: 'Error processing the Excel file. Please check the format.'
-      });
+      console.error("Error uploading file:", error);
+      if (req.file) {
+        deleteUploadedFile(path.join(UPLOADS_DIR, req.file.filename));
+      }
+      return res.status(500).json({ error: "Failed to upload the file." });
     }
-  };
+  }
+);
 
-  const addNewRow = useCallback(() => {
-    setDisseminations(prev => [
-      ...prev,
-      {
-        ...columnTitles.reduce((acc, title) => {
-          if (title === 'applicable') {
-            acc[title] = '';
-          } else if (title === 'linkedToEarlierCircular') {
-            acc[title] = '';
-          } else if (title === 'regulatoryTimelines') {
-            acc[title] = '';
-          } else if (title === 'policyToUpdate') {
-            acc[title] = '';
-          } else if (title === 'actionType') {
-            acc[title] = '';
-          } else {
-            acc[title] = '';
-          }
-          return acc;
-        }, {}),
-        relatedCircularNumbers: [],
-        searchedResult: [],
-        searchTerm: "",
-        customRegulator: "",
-      }
-    ]);
-  }, []);
+adminRouter.get("/get-entities-files", async (req: Request, res: Response) => {
+  const { entityId, page, pageSize } = req.query;
 
-  const resetEntries = useCallback(() => {
-    setDisseminations([]);
-    setAttachmentFiles({});
-    if (fileInputRef.current) {
-      fileInputRef.current.value = "";
-    }
-    // setNotification(null);
-  }, [fileInputRef]);
+  const parsedPage = page ? Number(page) : 1;
+  const parsedPageSize = pageSize ? Number(pageSize) : 10;
 
-  const handleInputChange = useCallback((index, field, value) => {
-    setDisseminations(prev => {
-      const updated = [...prev];
-      
-      // Special handling for regulator fields
-      if (field === "regulator") {
-        updated[index] = {
-          ...updated[index],
-          regulator: value,
-          customRegulator: value === "Custom" ? "" : ""  // Reset customRegulator only when Custom is selected
-        };
-      } else if (field === "customRegulator") {
-        // When custom regulator value is entered, keep "Custom" selected in regulator dropdown
-        updated[index] = {
-          ...updated[index],
-          regulator: "Custom",  // Keep "Custom" selected
-          customRegulator: value  // Store the custom value
-        };
-      } else if (field === 'attachment' && value instanceof File) {
-        updated[index][field] = value;
-        setAttachmentFiles(prev => ({
-          ...prev,
-          [index]: value
-        }));
-      } else {
-        updated[index][field] = value;
-      }
-      
-      return updated;
-    });
-    setNotification(prev => ({ ...prev, isOpen: false }));
+  if (isNaN(parsedPage) || parsedPage < 1) {
+    return res.status(400).json({ error: "Invalid 'page' parameter. Must be a positive number." });
+  }
 
-    setValidationErrors(prev => {
-      const newErrors = [...prev];
-      const errorIndex = newErrors.findIndex(err => err?.index === index);
-      
-      if (errorIndex !== -1) {
-        // If there's an error object for this row
-        const errorObj = { ...newErrors[errorIndex] };
-        
-        if (errorObj.errors && errorObj.errors[field]) {
-          // Mark this field as fixed
-          setFixedFields(prev => ({
-            ...prev,
-            [`${index}-${field}`]: true
-          }));
-          
-          // Clear the error for this field
-          const updatedErrors = { ...errorObj.errors };
-          delete updatedErrors[field];
-          
-          // Update the errors array
-          if (Object.keys(updatedErrors).length === 0) {
-            // If no more errors for this row, remove the row from errors array
-            return newErrors.filter((_, i) => i !== errorIndex);
-          } else {
-            // Otherwise update the error object
-            newErrors[errorIndex] = {
-              ...errorObj,
-              errors: updatedErrors
-            };
-          }
-        }
-      }
-      
-      return newErrors;
-    });
-  }, []);
-
-  const getValidationClass = useCallback((index, field) => {
-    const errorRow = validationErrors.find(err => err?.index === index);
-    const hasError = errorRow?.errors && errorRow.errors[field];
-    const wasFixed = fixedFields[`${index}-${field}`];
-    
-    if (hasError) return 'upload_diss_field_invalid';
-    if (wasFixed) return 'upload_diss_field_fixed';
-    return '';
-  }, [validationErrors, fixedFields]);
-  
-  const getCellClass = useCallback((index, field) => {
-    const errorRow = validationErrors.find(err => err?.index === index);
-    const hasError = errorRow?.errors && errorRow.errors[field];
-    const wasFixed = fixedFields[`${index}-${field}`];
-    
-    if (hasError) return 'validation-error';
-    if (wasFixed) return 'validation-fixed';
-    return '';
-  }, [validationErrors, fixedFields]);
-
-  const handleSelectCircular = useCallback((index, circular) => {
-    setDisseminations(prev => {
-      const updated = [...prev];
-      const row = { ...updated[index] };
-      row.searchedResult = [];
-      const existing = row.relatedCircularNumbers || [];
-      row.relatedCircularNumbers = [...new Set([...existing, circular.id])];
-      row.searchTerm = "";
-      updated[index] = row;
-      return updated;
-    });
-  }, []);
-
-  const deleteRow = useCallback((rowIndex) => {
-    setDisseminations(prev => prev.filter((_, i) => i !== rowIndex));
-  }, []);
-
-  const handleSubmit = async () => {
-    setFixedFields({});
-    setValidationErrors([]);
-    let hasErrors = false;
-
-    const errorsArray = disseminations.map((row, index) => {
-    const errors = {};
-    
-    Object.keys(row).forEach((field) => {
-      if (field === 'regulatoryDeadline' && row.regulatoryTimelines !== 'Yes') return;
-      if (field === 'relatedCircularNumbers' && row.linkedToEarlierCircular !== 'Yes') return;
-      if (['searchedResult', 'searchTerm'].includes(field)) return;
-      
-      // Modified regulator validation
-      if (field === 'regulator') {
-        // For regulator field
-        if (row.regulator === 'Custom') {
-          // If regulator is Custom, check if customRegulator has a value
-          if (!row.customRegulator) {
-            errors.customRegulator = true;
-          }
-        } else if (!row.regulator || row.regulator === '') {
-          // If not Custom, check if regulator has a value
-          errors.regulator = true;
-        }
-        return;
-      }
-
-      // Skip validation for customRegulator as it's handled above
-      if (field === 'customRegulator') return;
-
-      // For all other fields
-      if (!row[field]) {
-        errors[field] = true;
-      }
-    });
-
-    if (Object.keys(errors).length > 0) {
-      hasErrors = true;
-      return { index, errors };
-    }
-    return null;
-  });
-
-  if (hasErrors) {
-    setValidationErrors(errorsArray.filter(Boolean));
-    setNotification({
-      isOpen: true,
-      type: 'warning',
-      message: 'Please fill in all required fields correctly.'
-    });
-    return;
+  if (isNaN(parsedPageSize) || parsedPageSize < 1) {
+    return res.status(400).json({ error: "Invalid 'pageSize' parameter. Must be a positive number." });
   }
 
   try {
-    setLoading(true);
-    const transformedDisseminations = disseminations.map(row => {
-      const transformedRow = { ...row };
-      // No need to transform regulator data as it's already in the correct format
-      return transformedRow;
-    });
+    if (entityId === "all") {
+      const skip = (parsedPage - 1) * parsedPageSize;
 
-    const formData = new FormData();
-    formData.append('disseminations', JSON.stringify(transformedDisseminations));
-    
-    // Add attachments
-    Object.entries(attachmentFiles).forEach(([_, file]) => {
-      formData.append(`attachments`, file);
-    });
-
-    const response = await apiFormRequest('POST', DISSEMINATION_URL, formData);
-    
-    if (response.data.success) {
-      // using to replace alerts 
-      setNotification({
-        isOpen: true,
-        type: 'success',
-        message: 'Data submitted successfully!'
+      const entitiesWithFiles = await prisma.entity.findMany({
+        skip,
+        take: parsedPageSize,
+        where: {
+          files: {
+            some: {},
+          },
+        },
+        include: {
+          files: true,
+        },
       });
-      resetEntries();
-      // resetEntries();
-    } else {
-      throw new Error(response.data.message || 'Failed to submit data');
-    }
-  } catch (err) {
-    const errorMessage = err.response?.data?.message || err.message || "Error submitting data.";
-    // setError(errorMessage);
-    // alert(errorMessage);
-    setNotification({
-      isOpen: true,
-      type: 'error',
-      message: errorMessage
-    });
-  } finally {
-    setLoading(false);
-  }
-};
 
-  return {
-    disseminations,
-    fixedFields,
-    getValidationClass,
-    getCellClass,
-    regulatorOptions,
-    setRegulatorOptions,
-    loading,
-    notification,
-    setNotification,
-    validationErrors,
-    attachmentFiles,
-    handleUploadFile,
-    addNewRow,
-    resetEntries,
-    handleInputChange,
-    handleSearchChange,
-    handleSelectCircular,
-    deleteRow,
-    handleSubmit,
-  };
-};
+      const totalEntities = await prisma.entity.count({
+        where: {
+          files: {
+            some: {},
+          },
+        },
+      });
+
+      return res.status(200).json({
+        entities: entitiesWithFiles,
+        total: totalEntities,
+        page: parsedPage,
+        pageSize: parsedPageSize,
+      });
+    } else if (entityId) {
+      const entityWithFiles = await prisma.entity.findUnique({
+        where: { id: Number(entityId) },
+        include: {
+          files: true,
+        },
+      });
+
+      if (!entityWithFiles) {
+        return res.status(404).json({ error: "Entity not found." });
+      }
+
+      return res.status(200).json({ entities: [entityWithFiles] });
+    } else {
+      return res.status(400).json({ error: "Invalid query parameter. Provide 'entityId' or use 'all'." });
+    }
+  } catch (error) {
+    console.error("Error fetching entities and files:", error);
+    return res.status(500).json({ error: "Failed to fetch entities and files." });
+  }
+});
+
+adminRouter.get("/delete-file", async (req: Request, res: Response) => {
+  const { fileId } = req.query;
+
+  if (!fileId) {
+    return res.status(400).json({ error: "File ID is required." });
+  }
+
+  try {
+    const file = await prisma.file.findUnique({
+      where: { id: Number(fileId) },
+    });
+
+    if (!file) {
+      return res.status(404).json({ error: "File not found." });
+    }
+
+    const filePath = path.join(UPLOADS_DIR, path.basename(file.path));
+
+    try {
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    } catch (deleteError) {
+      console.error("Error deleting file from disk:", deleteError);
+      return res.status(500).json({ error: "Failed to delete the file from the server." });
+    }
+
+    await prisma.file.delete({ where: { id: Number(fileId) } });
+
+    return res.status(200).json({ message: "File deleted successfully." });
+  } catch (error) {
+    console.error("Error deleting file:", error);
+    return res.status(500).json({ error: "Failed to delete the file." });
+  }
+});
+
+export default adminRouter;
