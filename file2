@@ -1,19 +1,582 @@
-<div className="diss_repo_filter_group">
-                        <label htmlFor="circularStateFilter" className="diss_repo_filter_label">Circular State</label>
-                        <select
-                            id="circularStateFilter"
-                            value={filterCircularState}
-                            onChange={(e) => setFilterCircularState(e.target.value)}
-                            className={`diss_repo_select ${!filterCircularState ? 'placeholder' : ''}`}
+// uploadDissemination.jsx
+import React, { useRef, useEffect, useState } from 'react';
+import {
+  Upload,
+  Trash2,
+  FileText,
+  Plus,
+  Database,
+  AlertCircle,
+  Check
+} from 'lucide-react';
+import { columnTitles, dropdownOptions, defaultRegulatorOptions } from '../../../constants/dissemination';
+import { useDissemination } from './useDissemination';
+import { apiRequest } from '../../axios/apiRequest';
+import ToastNotification from '../../../helpers/ToastNotification';
+import { uploadDisseminationColumns, getColumnWidth, getColumnClassName } from './uploadDisseminationColumns';
+import '../../../css/uploadDissemination.css';
+
+// Validated input components
+const ValidatedTextInput = ({ value, onChange, validationClass, hasError, wasFixed }) => (
+  <div className="upload_diss_input_wrapper">
+    <input
+      type="text"
+      value={value || ""}
+      className={`upload_diss_textarea_editable ${validationClass}`}
+      onChange={onChange}
+    />
+    {hasError && (
+      <span className="upload_diss_validation_indicator error">
+        <AlertCircle size={16} />
+      </span>
+    )}
+    {wasFixed && !hasError && (
+      <span className="upload_diss_validation_indicator success">
+        <Check size={16} />
+      </span>
+    )}
+  </div>
+);
+
+const ValidatedSelectInput = ({ value, options, onChange, validationClass, hasError, wasFixed, includeDefaultOption = true }) => (
+  <div className="upload_diss_input_wrapper">
+    <select
+      value={value || ""}
+      className={`upload_diss_select_editable ${validationClass}`}
+      onChange={onChange}
+      style={{ paddingRight: '40px' }}
+    >
+      {includeDefaultOption && <option value="">Select</option>}
+      {options.map((option) => (
+        <option key={option.value} value={option.value}>
+          {option.label}
+        </option>
+      ))}
+    </select>
+    {hasError && (
+      <span className="upload_diss_validation_indicator error" style={{ right: '24px' }}> {/* Position adjusted */}
+        <AlertCircle size={16} />
+      </span>
+    )}
+    {wasFixed && !hasError && (
+      <span className="upload_diss_validation_indicator success" style={{ right: '24px' }}> {/* Position adjusted */}
+        <Check size={16} />
+      </span>
+    )}
+  </div>
+);
+
+// Modified date input to prevent calendar icon overlap
+const ValidatedDateInput = ({ value, onChange, validationClass, hasError, wasFixed }) => (
+  <div className="upload_diss_input_wrapper">
+    <input
+      type="date"
+      value={value || ""}
+      className={`upload_diss_date_picker ${validationClass}`}
+      onChange={onChange}
+      style={{ paddingRight: '40px' }} // Add extra padding to the right
+    />
+    {hasError && (
+      <span className="upload_diss_validation_indicator error" style={{ right: '24px' }}> {/* Position adjusted */}
+        <AlertCircle size={16} />
+      </span>
+    )}
+    {wasFixed && !hasError && (
+      <span className="upload_diss_validation_indicator success" style={{ right: '24px' }}> {/* Position adjusted */}
+        <Check size={16} />
+      </span>
+    )}
+  </div>
+);
+
+const UploadDissemination = () => {
+  const fileInputRef = useRef(null);
+  const [selectedFileName, setSelectedFileName] = useState('');
+
+  const {
+    disseminations,
+    regulatorOptions,
+    setRegulatorOptions,
+    loading,
+    notification,
+    setNotification,
+    validationErrors,
+    fixedFields,
+    handleUploadFile,
+    addNewRow,
+    resetEntries,
+    handleInputChange,
+    handleSearchChange,
+    handleSelectCircular,
+    deleteRow,
+    handleSubmit,
+    getValidationClass,
+    getCellClass,
+  } = useDissemination(fileInputRef);
+
+  // clear file when upload dissemination is success
+  useEffect(() => {
+    if (notification.isOpen && notification.type === 'success') {
+      clearSelectedFile();
+    }
+  }, [notification]);
+
+  useEffect(() => {
+    const fetchRegulators = async () => {
+      try {
+        const endpoint = `${process.env.REACT_APP_BACKEND_URL}/api/user/regulators`;
+        const response = await apiRequest("GET", endpoint);
+        if (response.data.success) {
+          setRegulatorOptions([
+            ...defaultRegulatorOptions,
+            ...response.data.data.map((reg) => ({
+              value: reg.value,
+              label: reg.label
+            }))
+          ]);
+        }
+      } catch (error) {
+        console.error('Error fetching regulators:', error);
+      }
+    };
+
+    fetchRegulators();
+  }, [setRegulatorOptions]);
+
+  const handleFileChange = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      setSelectedFileName(file.name);
+      handleUploadFile(e);
+    }
+  };
+
+  const clearSelectedFile = () => {
+    setSelectedFileName('');
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  const renderEmptyState = () => (
+    <div className="upload_diss_empty_state">
+      <Database size={48} className="upload_diss_empty_icon" />
+      <p className="upload_diss_empty_text">
+        Ready to upload your dissemination data? Add a new row to get started or upload an Excel file.
+      </p>
+      <button className="upload_diss_start_button" onClick={addNewRow}>
+        <Plus size={18} />
+        Add New Row
+      </button>
+    </div>
+  );
+
+  return (
+    <div className="upload_diss_container">
+      <h2 className="h2-heading">Upload Dissemination</h2>
+      <div className="upload_diss_button_container flex justify-between">
+        <div>
+          <div className="upload_diss_file_input_wrapper">
+            <label className="upload_diss_file_upload">
+              <Upload size={18} className="upload_diss_file_upload_icon" />
+              Upload Excel File
+              <input
+                type="file"
+                accept=".xlsx"
+                onChange={handleFileChange}
+                ref={fileInputRef}
+                className="upload_diss_file_input"
+              />
+            </label>
+            {selectedFileName && (
+              <div className="upload_diss_file_name_container">
+                <span className="upload_diss_file_name">
+                  <FileText size={16} className="upload_diss_file_name_icon" />
+                  {selectedFileName}
+                </span>
+                <button
+                  className="upload_diss_file_clear"
+                  onClick={clearSelectedFile}
+                  title="Clear selected file"
+                >
+                  <Trash2 size={16} />
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {disseminations.length > 0 && (
+          <div className="upload_diss_action_buttons">
+            <button className="upload_diss_fetch_button flex flex-row" onClick={addNewRow}>
+              <Plus size={18} style={{ marginRight: '5px' }} />
+              <span>Add New Row</span>
+            </button>
+            <button
+              className="upload_diss_clear_btn"
+              onClick={resetEntries}
+            >
+              Clear
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div id='table-dissemination' className="upload_diss_table_container">
+        {disseminations.length === 0 ? (
+          renderEmptyState()
+        ) : (
+          <table className="upload_diss_table">
+            <thead>
+              <tr>
+                {uploadDisseminationColumns.map(column => (
+                  <th
+                    key={column.id}
+                    style={{ width: column.width }}
+                    className={column.className}
+                  >
+                    {column.label}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {disseminations.map((row, index) => {
+                const errorRow = validationErrors.find((ve) => ve?.index === index);
+                const rowValidation = errorRow?.errors || {};
+
+                return (
+                  <tr key={index}>
+                    <td style={{ width: getColumnWidth('action') }}>
+                      <button
+                        className="upload_diss_delete_row_btn"
+                        onClick={() => deleteRow(index)}
+                        title="Delete row"
+                      >
+                        <Trash2 size={18} />
+                      </button>
+                    </td>
+                    {columnTitles.map((field) => {
+                      // Get validation state for this field
+                      const validationClass = getValidationClass(index, field);
+                      const cellClass = getCellClass(index, field);
+                      const hasError = rowValidation[field];
+                      const wasFixed = fixedFields[`${index}-${field}`];
+
+                      // Set column style
+                      const columnStyle = {
+                        width: getColumnWidth(field)
+                      };
+
+                      // Regulator field
+                      if (field === "regulator") {
+                        return (
+                          <td
+                            key={field}
+                            style={columnStyle}
+                            className={`${getColumnClassName(field)} ${cellClass}`}
+                          >
+                            <ValidatedSelectInput
+                              value={row.regulator}
+                              options={regulatorOptions}
+                              onChange={(e) => handleInputChange(index, "regulator", e.target.value)}
+                              validationClass={validationClass}
+                              hasError={hasError}
+                              wasFixed={wasFixed}
+                              includeDefaultOption={false} // to avoid double select bug 
+                            />
+                            {row.regulator === "Custom" && (
+                              <div className="mt-2">
+                                <ValidatedTextInput
+                                  value={row.customRegulator}
+                                  onChange={(e) => handleInputChange(index, "customRegulator", e.target.value)}
+                                  validationClass={getValidationClass(index, "customRegulator")}
+                                  hasError={rowValidation.customRegulator}
+                                  wasFixed={fixedFields[`${index}-customRegulator`]}
+                                />
+                              </div>
+                            )}
+                          </td>
+                        );
+                      }
+
+                      if (field === "gist") {
+                        return (
+                          <td
+                            key={field}
+                            style={columnStyle}
+                            className={`${getColumnClassName(field)} ${cellClass}`}
+                          >
+                            <textarea
+                              value={row.gist}
+                              onChange={(e) => handleInputChange(index, "gist", e.target.value)}
+                              className="custom-textarea"
+                            />
+                          </td>
+                        );
+                      }
+
+
+                      if (field === "applicability") {
+                        return (
+                          <td
+                            key={field}
+                            style={columnStyle}
+                            className={`${getColumnClassName(field)} ${cellClass}`}
+                          >
+                            <textarea
+                              value={row.applicability}
+                              onChange={(e) => handleInputChange(index, "applicability", e.target.value)}
+                              className="custom-textarea"
+                            />
+                          </td>
+                        );
+                      }
+
+                      // Circular Date field
+                      if (field === "circularDate") {
+                        return (
+                          <td
+                            key={field}
+                            style={columnStyle}
+                            className={`${getColumnClassName(field)} ${cellClass}`}
+                          >
+                            <ValidatedDateInput
+                              value={row[field]}
+                              onChange={(e) => handleInputChange(index, field, e.target.value)}
+                              validationClass={validationClass}
+                              hasError={hasError}
+                              wasFixed={wasFixed}
+                            />
+                          </td>
+                        );
+                      }
+
+                      // Regulatory Deadline field
+                      if (field === "regulatoryDeadline") {
+                        return (
+                          <td
+                            key={field}
+                            style={columnStyle}
+                            className={`${getColumnClassName(field)} ${cellClass}`}
+                          >
+                            {row.regulatoryTimelines === "YES" ? (
+                              <ValidatedDateInput
+                                value={row[field]}
+                                onChange={(e) => handleInputChange(index, field, e.target.value)}
+                                validationClass={validationClass}
+                                hasError={hasError}
+                                wasFixed={wasFixed}
+                              />
+                            ) : (
+                              <p>NA</p>
+                            )}
+                          </td>
+                        );
+                      }
+
+                      // Dropdown fields
+                      if (dropdownOptions[field]) {
+                        return (
+                          <td
+                            key={field}
+                            style={columnStyle}
+                            className={`${getColumnClassName(field)} ${cellClass}`}
+                          >
+                            <ValidatedSelectInput
+                              value={row[field]}
+                              options={dropdownOptions[field]}
+                              onChange={(e) => handleInputChange(index, field, e.target.value)}
+                              validationClass={validationClass}
+                              hasError={hasError}
+                              wasFixed={wasFixed}
+                            />
+                          </td>
+                        );
+                      }
+
+                      // Related Circular Numbers field
+                      if (field === "relatedCircularNumbers") {
+                        return (
+                          <td
+                            key={field}
+                            style={columnStyle}
+                            className={`${getColumnClassName(field)} ${cellClass}`}
+                          >
+                            {row.linkedToEarlierCircular === "YES" ? (
+                              <div className="upload_diss_search_wrapper">
+                                <div className="upload_diss_input_wrapper">
+                                  <input
+                                    type="text"
+                                    placeholder="Search circulars..."
+                                    value={row.searchTerm || ""}
+                                    onChange={(e) => handleSearchChange(index, "searchTerm", e.target.value)}
+                                    className={`upload_diss_search_input ${validationClass}`}
+                                  />
+                                  {hasError && (
+                                    <span className="upload_diss_validation_indicator error">
+                                      <AlertCircle size={16} />
+                                    </span>
+                                  )}
+                                  {wasFixed && !hasError && (
+                                    <span className="upload_diss_validation_indicator success">
+                                      <Check size={16} />
+                                    </span>
+                                  )}
+                                </div>
+
+                                {row.searchedResult?.length > 0 && (
+                                  <div className="upload_diss_search_results">
+                                    {row.searchedResult.map((circular) => (
+                                      <div
+                                        key={circular.id}
+                                        className="upload_diss_search_result"
+                                        onClick={() => {
+                                          handleSelectCircular(index, circular);
+                                          handleSearchChange(index, "searchTerm", "");
+                                        }}
+                                      >
+                                        <span>{circular.circularTitle}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                                <div className="mt-2 flex flex-wrap gap-2">
+                                  {Array.isArray(row.relatedCircularNumbers) && row.relatedCircularNumbers.map((id) => (
+                                    <span
+                                      key={id}
+                                      className="upload_diss_circular_tag"
+                                    >
+                                      <span className="upload_diss_circular_tag_text">{id}</span>
+                                      <button
+                                        onClick={() => {
+                                          handleInputChange(
+                                            index,
+                                            "relatedCircularNumbers",
+                                            row.relatedCircularNumbers.filter(
+                                              (existingId) => existingId !== id
+                                            )
+                                          );
+                                        }}
+                                        className="upload_diss_circular_tag_remove"
+                                      >
+                                        ×
+                                      </button>
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            ) : (
+                              <p>NA</p>
+                            )}
+                          </td>
+                        );
+                      }
+
+                      // Attachment field
+                      if (field === "attachment") {
+                        return (
+                          <td
+                            key={field}
+                            style={columnStyle}
+                            className={`${getColumnClassName(field)} ${cellClass}`}
+                          >
+                            <div className="upload_diss_input_wrapper">
+                              <label className="upload_diss_file_upload" style={{ fontSize: '13px', padding: '6px 12px' }}>
+                                <Upload size={14} className="upload_diss_file_upload_icon" />
+                                {row[field] ? 'Change File' : 'Choose File'}
+                                <input
+                                  type="file"
+                                  accept=".pdf,.xlsx,.doc,.docx,.jpeg,.jpg,.png"
+                                  onChange={(e) => {
+                                    const file = e.target.files?.[0];
+                                    const allowedTypes = [
+                                      "application/pdf",
+                                      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                      "application/msword",
+                                      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                      "image/jpeg",
+                                      "image/png",
+                                    ];
+
+                                    if (file && allowedTypes.includes(file.type)) {
+                                      handleInputChange(index, "attachment", file);
+                                    } else {
+                                      setNotification({
+                                        isOpen: true,
+                                        type: 'error',
+                                        message: "Invalid file type. Please upload a valid file."
+                                      });
+                                    }
+                                  }}
+                                  className="upload_diss_file_input"
+                                />
+                              </label>
+                              {hasError && (
+                                <span className="upload_diss_validation_indicator error" style={{ top: '16px', right: '12px' }}>
+                                  <AlertCircle size={16} />
+                                </span>
+                              )}
+                              {wasFixed && !hasError && (
+                                <span className="upload_diss_validation_indicator success" style={{ top: '16px', right: '12px' }}>
+                                  <Check size={16} />
+                                </span>
+                              )}
+                              {row[field] && (
+                                <span className="upload_diss_file_name" style={{ display: 'block', marginTop: '4px' }}>
+                                  {row[field].name}
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                        );
+                      }
+
+                      // Default text input for remaining fields
+                      return (
+                        <td
+                          key={field}
+                          style={columnStyle}
+                          className={`${getColumnClassName(field)} ${cellClass}`}
                         >
-                            <option value="">All States</option>
-                            {CircularStateOptions.map((option) => (
-                                <option key={option} value={option}>
-                                    {option === "NOT_INITIATED" ? "Not Initiated" :
-                                        option === "INITIATED" ? "Initiated" :
-                                            option === "REJECTED" ? "Rejected" :
-                                                option === "CLOSURE" ? "Closure" : option}
-                                </option>
-                            ))}
-                        </select>
-                    </div>
+                          <ValidatedTextInput
+                            value={row[field]}
+                            onChange={(e) => handleInputChange(index, field, e.target.value)}
+                            validationClass={validationClass}
+                            hasError={hasError}
+                            wasFixed={wasFixed}
+                          />
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      <div className="upload_diss_button_content_container">
+        <button
+          onClick={() => {
+            handleSubmit()
+          }}
+          className="upload_diss_fetch_button"
+          disabled={loading || disseminations.length === 0}
+        >
+          {loading ? "Uploading..." : "Upload"}
+        </button>
+      </div>
+
+      <ToastNotification
+        isOpen={notification.isOpen}
+        type={notification.type}
+        message={notification.message}
+        onClose={() => setNotification(prev => ({ ...prev, isOpen: false }))}
+      />
+    </div>
+  );
+};
+
+export default UploadDissemination;
