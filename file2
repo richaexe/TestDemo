@@ -1,567 +1,379 @@
-import { useEffect, useState, useRef } from "react";
-import "../../../css/table.css";
-import { apiFormRequest } from "../../axios/apiFormRequest";
-import { apiRequest } from "../../axios/apiRequest";
-import { removeBankFromEnd } from "../commonFunctions";
-import ToastNotification from "../../../helpers/ToastNotification";
+import { Router } from "express";
+import { EntityType, PrismaClient } from "@prisma/client";
+import { populateDatabase } from "../scripts/populate";
+import multer, { StorageEngine } from "multer";
+import path from "path";
+import fs from "fs";
+import { Request, Response } from "express";
+import { uploadDissemination } from "../controllers/admin/adminController";
+import { validateDissemination } from "../validation/user/compliance/uploadDissemination";
+import { addEntitySchema, deleteEntitySchema, deleteFileSchema, getEntitiesFilesSchema, uploadFileSchema } from "../validation/admin";
+import logger from "../config/logger";
+import requireUser from "../middleware/requireUser";
 
-const ExcelTableBCBS = ({
-    title,
-    apiEndpoint,
-    columnTitles,
-    columnWidths,
-    editableFields,
-    dropdownOptions,
-    remarksField,
-}) => {
-    const [data, setData] = useState([]);
-    const [searchData, setSearchData] = useState("");
-    const [entityList, setEntityList] = useState([]);
-    const [selectedEntity, setSelectedEntity] = useState("");
-    const [loading, setLoading] = useState(false);
-    const [showRejected, setShowRejected] = useState(false);
-    const [expandedRows, setExpandedRows] = useState([]);
-    const [fetchBtnPressed, setFetchBtnPressed] = useState(false);
-    const [showFilled, setShowFilled] = useState(false);
-    const [notification, setNotification] = useState({ isOpen: false, type: '', message: '' });
-    const [lastSaved, setLastSaved] = useState(null);
+const prisma = new PrismaClient();
 
-    // Use refs to keep track of unsaved changes
-    const dataRef = useRef(data);
-    const changedRowsRef = useRef({});
-    const autosaveTimeoutRef = useRef(null);
-    const autosaveIntervalRef = useRef(null);
+const adminRouter = Router();
 
-    // Update ref when data changes
-    useEffect(() => {
-        dataRef.current = data;
-    }, [data]);
+adminRouter.post("/add-entity", async (req, res) => {
+  let result = addEntitySchema.safeParse(req.body);
+  if (!result.success) {
+    res.status(400).json({
+      error: true,
+      message: result.error.errors[0].message
+    });
+    return;
+  }
+  logger.info("Adding Entity");
+  const { name, type, year, previousData } = req.body;
+  const parsedType = type?.toUpperCase();
+  const parsedName = name?.toUpperCase();
+  if (!name || typeof name !== "string") {
+    res.status(400).json({ error: "Entity name is required." });
+    return;
+  }
+  logger.info(`Adding Entity Bank ${req.body}`);
+  if (!year || typeof year !== "number") {
+    res.status(400).json({
+      error: "Entity year not specified."
+    });
+    return;
+  }
 
-    // Setup event listeners for page visibility and beforeunload
-    useEffect(() => {
-        // Save data when page becomes hidden (user switches tabs, minimizes window, etc.)
-        const handleVisibilityChange = () => {
-            if (document.visibilityState === 'hidden') {
-                autoSaveChangedRows(false);
-            }
-        };
+  if (!parsedType && !Object.values(EntityType).includes(parsedType as EntityType)) {
+    res.status(400).json({
+      error: "Entity type not specified."
+    });
+    return;
+  }
 
-        // Save data before user leaves/refreshes the page
-        const handleBeforeUnload = (e) => {
-            if (Object.keys(changedRowsRef.current).length > 0) {
-                autoSaveChangedRows(false);
-                // Modern browsers require returnValue to be set
-                e.preventDefault();
-                e.returnValue = '';
-                return '';
-            }
-        };
+  try {
+    const existingEntity = await prisma.entity.findUnique({
+      where: {
+        name_type_year: {
+          name: parsedName,
+          type: parsedType as EntityType,
+          year
+        }
+      }
+    });
 
-        // Set up autosave interval (every 1 minute)
-        autosaveIntervalRef.current = setInterval(() => {
-            if (Object.keys(changedRowsRef.current).length > 0) {
-                autoSaveChangedRows(false);
-            }
-        }, 1 * 60 * 1000); // 1 minute in milliseconds
+    if (existingEntity) {
+      logger.error(`Error:An entity with the name "${name}" already exists in year "${year}" `);
+      res.status(400).json({ error: `An entity with the name "${name}" already exists in year "${year}".` });
+      return;
+    }
 
-        document.addEventListener('visibilitychange', handleVisibilityChange);
-        window.addEventListener('beforeunload', handleBeforeUnload);
+    const newEntity = await prisma.entity.create({ data: { name: parsedName, type: type.toUpperCase(), year, previousRBIData: previousData, previousBCBSData: previousData } });
+    if (!previousData) {
+      try {
+        const rbiJsonFilePath = "src/scripts/rbi_data.json";
+        const bcbsJsonPath = "src/scripts/bcbs_data.json";
+        await populateDatabase(newEntity.id, bcbsJsonPath, rbiJsonFilePath);
 
-        return () => {
-            document.removeEventListener('visibilitychange', handleVisibilityChange);
-            window.removeEventListener('beforeunload', handleBeforeUnload);
-            clearInterval(autosaveIntervalRef.current);
-            if (autosaveTimeoutRef.current) {
-                clearTimeout(autosaveTimeoutRef.current);
-            }
-        };
-    }, []);
+        res.status(201).json({ message: "Entity added and data populated successfully.", entity: newEntity });
+      } catch (populateError) {
+        await prisma.entity.delete({ where: { id: newEntity.id } });
+        throw populateError;
+      }
+    } else {
+      res.status(201).json({ message: "Entity added successfully.", entity: newEntity });
+    }
+  } catch (error: any) {
+    console.error("Error adding entity:", error.message);
+    res.status(500).json({ error: error.message || "Failed to add the entity." });
+  }
+});
 
-    const toggleExpand = (id) => {
-        setExpandedRows((prev) =>
-            prev.includes(id) ? prev.filter((rowId) => rowId !== id) : [...prev, id]
-        );
+adminRouter.delete("/delete-entity", async (req, res) => {
+  let result = deleteEntitySchema.safeParse(req.body);
+  if (!result.success) {
+    res.status(400).json({
+      error: true,
+      message: result.error.errors[0].message
+    });
+    return;
+  }
+  const { id } = req.body;
+
+  if (!id) {
+    res.status(400).json({ success: false, message: "ID is required." });
+    return;
+  }
+
+  try {
+    // Check if the entity exists
+    const entity = await prisma.entity.findUnique({
+      where: { id: parseInt(id) },
+    });
+
+    if (!entity) {
+      res.status(404).json({ success: false, message: "Entity not found." });
+      return;
+    }
+
+    // Delete the entity
+    await prisma.entity.delete({
+      where: { id: parseInt(id) },
+    });
+
+    res.status(200).json({ success: true, message: "Entity deleted successfully." });
+    return;
+  } catch (error) {
+    console.error("Error deleting entity:", error);
+    res.status(500).json({ success: false, message: "Failed to delete entity." });
+    return;
+  }
+});
+
+const storage: StorageEngine = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const uploadDir = path.join(__dirname, "../uploads");
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = `${Date.now()}`;
+    cb(null, `${uniqueSuffix}-${file.originalname}`);
+  },
+});
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowedMimeTypes = [
+      "application/pdf",
+      "application/vnd.ms-powerpoint",
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ];
+    if (allowedMimeTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error("Invalid file type. Only PDF and PPT files are allowed."));
+    }
+  },
+});
+
+adminRouter.post(
+  "/upload-file",
+  upload.single("file"),
+  async (req: Request, res: Response) => {
+    const deleteUploadedFile = (filePath: string) => {
+      try {
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+        }
+      } catch (error) {
+        console.error("Error deleting uploaded file:", error);
+      }
     };
 
-    // mapping finalRiskScore to riskRating 
-    const getRiskRating = (score) => {
-        if (score >= 1 && score <= 9) return "LOW";
-        if (score >= 10 && score <= 18) return "MEDIUM";
-        if (score >= 19 && score <= 27) return "HIGH";
-        if (score > 27) return "VERY_HIGH";
-        return null;
-    };
+    try {
+      const { entityId } = req.query;
 
-    const handleFieldChange = (id, field, value) => {
-        // Track which rows have been changed
-        changedRowsRef.current[id] = true;
-
-        // Update the data state
-        setData((prevData) =>
-            prevData.map((row) =>
-                row.id === id ? { ...row, [field]: value } : row
-            )
-        );
-
-        // Set up debounced autosave (wait 3 seconds after last edit)
-        if (autosaveTimeoutRef.current) {
-            clearTimeout(autosaveTimeoutRef.current);
+      if (!entityId) {
+        if (req.file) {
+          deleteUploadedFile(path.join(__dirname, "../uploads", req.file.filename));
         }
+        res.status(400).json({ error: "Entity ID is required." });
+        return;
+      }
 
-        autosaveTimeoutRef.current = setTimeout(() => {
-            autoSaveChangedRows(false);
-        }, 3000); // 3 seconds debounce
-    };
-
-    // Function to autosave all changed rows
-    // showToast parameter controls whether to show notifications
-    const autoSaveChangedRows = async (showToast = true) => {
-        const changedIds = Object.keys(changedRowsRef.current);
-
-        if (changedIds.length === 0) return;
-
-        let savedCount = 0;
-        let errorCount = 0;
-
-        for (const id of changedIds) {
-            const rowToSave = dataRef.current.find(row => row.id === id);
-            if (!rowToSave || rowToSave.isSubmitDisabled) continue;
-
-            try {
-                // Only auto-save with current status (don't submit)
-                const currentStatus = rowToSave.status || 'NONE';
-                const saveStatus = currentStatus === 'PENDING' ? 'PENDING' :
-                    currentStatus === 'REJECTED' ? 'REJECTED' : 'NONE';
-
-                await apiRequest("POST", `/api/user/${apiEndpoint}`, {
-                    ...rowToSave,
-                    status: saveStatus
-                });
-
-                savedCount++;
-                delete changedRowsRef.current[id];
-            } catch (error) {
-                console.error(`Error auto-saving row ${id}:`, error);
-                errorCount++;
-            }
+      const entity = await prisma.entity.findUnique({ where: { id: Number(entityId) } });
+      if (!entity) {
+        if (req.file) {
+          deleteUploadedFile(path.join(__dirname, "../uploads", req.file.filename));
         }
+        res.status(404).json({ error: "Entity not found." });
+        return;
+      }
 
-        // Only show notification if explicitly requested (manual save button click)
-        if (showToast && (savedCount > 0 || errorCount > 0)) {
-            setNotification({
-                isOpen: true,
-                type: errorCount ? 'warning' : 'success',
-                message: errorCount
-                    ? `Auto-saved ${savedCount} items. Failed to save ${errorCount} items.`
-                    : `Auto-saved ${savedCount} items successfully.`,
-                id: Date.now()
-            });
+      const existingFile = await prisma.file.findFirst({ where: { entityId: entity.id } });
+      if (existingFile) {
+        if (req.file) {
+          deleteUploadedFile(path.join(__dirname, "../uploads", req.file.filename));
         }
+        res.status(400).json({
+          error: `The entity already has an associated file: "${existingFile.name}". Delete the existing file to upload a new one.`,
+        });
+        return;
+      }
 
-        if (savedCount > 0) {
-            setLastSaved(new Date());
+      if (!req.file) {
+        res.status(400).json({ error: "No file uploaded." });
+        return;
+      }
+
+      const { originalname, filename, mimetype, size } = req.file;
+      const filePath = path.join("uploads", filename);
+
+      try {
+        const file = await prisma.file.create({
+          data: {
+            name: originalname,
+            path: filePath,
+            mimeType: mimetype,
+            size,
+            entityId: entity.id,
+          },
+        });
+
+        res.status(201).json({ message: "File uploaded successfully.", file });
+      } catch (dbError) {
+        console.error("Error saving file to database:", dbError);
+        if (req.file) {
+          deleteUploadedFile(path.join(__dirname, "../uploads", req.file.filename));
         }
-    };
+        res.status(500).json({ error: "Failed to save the file to the database." });
+      }
+    } catch (error) {
+      console.error("Error uploading file:", error);
+      if (req.file) {
+        const filePath = path.join(__dirname, "../uploads", req.file.filename);
+        deleteUploadedFile(filePath);
+      }
+      res.status(500).json({ error: "Failed to upload the file." });
+    }
+  }
+);
 
-    const getBreadcrumb = () => {
-        let breadcrumb = ["Quality Assurance", "BCBS"];
+adminRouter.get("/get-entities-files", async (req: Request, res: Response) => {
+  let result = getEntitiesFilesSchema.safeParse(req.query);
+  if (!result.success) {
+    res.status(400).json({
+      error: true,
+      message: result.error.errors[0].message
+    });
+    return;
+  }
+  const { entityId, page, pageSize } = req.query;
 
-        if (selectedEntity) {
-            breadcrumb.push(selectedEntity.replace(/:/g, " "));
-            if (showRejected) {
-                breadcrumb.push("Rejected");
-            } else if (showFilled) {
-                breadcrumb.push("Filled");
-            } else {
-                breadcrumb.push("Unfilled");
-            }
-        }
-        return breadcrumb
-    };
+  const parsedPage = page ? Number(page) : 1;
+  const parsedPageSize = pageSize ? Number(pageSize) : 10;
 
-    useEffect(() => {
-        const fetchEntity = async () => {
-            try {
-                const response = await apiRequest("GET", "/api/user/entity");
-                setEntityList(response.data.entity);
-            } catch (error) {
-                console.error("Error fetching entity:", error);
-            }
-        };
+  if (isNaN(parsedPage) || parsedPage < 1) {
+    res.status(400).json({ error: "Invalid 'page' parameter. Must be a positive number." });
+    return;
+  }
 
-        fetchEntity();
-    }, []);
+  if (isNaN(parsedPageSize) || parsedPageSize < 1) {
+    res.status(400).json({ error: "Invalid 'pageSize' parameter. Must be a positive number." });
+    return;
+  }
 
-    const fetchData = async (selectedEntity) => {
-        if (selectedEntity === "") {
-            setNotification({
-                isOpen: true,
-                type: 'warning',
-                message: "Please Select an Entity First."
-            });
-            return;
-        }
-        setFetchBtnPressed(true)
-        const selectedEntityDetails = selectedEntity.split(":");
-        setLoading(true);
-        try {
-            const response = await apiFormRequest("GET", `/api/user/${apiEndpoint}`, { entityName: selectedEntityDetails[0], type: selectedEntityDetails[1], year: parseInt(selectedEntityDetails[2]) });
-            const dataWithEditState = response.data.map((row) => ({
-                ...row,
-                isEditable: row.status !== "PENDING",
-                isSubmitDisabled: row.status === "PENDING", // Disable if already submitted
-            }));
+  try {
+    if (entityId === "all") {
+      const skip = (parsedPage - 1) * parsedPageSize;
 
-            // Compute initial finalRiskScore and riskRating for all rows on load
-            const computedData = dataWithEditState.map((row) => {
-                const levelOfDocumentationScore = {
-                    ADEQUATELY_DOCUMENTED: 1,
-                    INADEQUATELY_DOCUMENTED: 2,
-                    NOT_DOCUMENTED: 3,
-                }[row.levelOfDocumentationOfControl] || 0;
+      const entitiesWithFiles = await prisma.entity.findMany({
+        skip,
+        take: parsedPageSize,
+        where: {
+          files: {
+            some: {},
+          },
+        },
+        include: {
+          files: true,
+        },
+      });
 
-                const levelOfAutomationScore = {
-                    AUTOMATED: 1,
-                    SEMI_AUTOMATED: 2,
-                    MANUAL: 3,
-                }[row.levelOfAutomationOfControl] || 0;
+      const totalEntities = await prisma.entity.count({
+        where: {
+          files: {
+            some: {},
+          },
+        },
+      });
 
-                const complianceScoreMap = {
-                    NOT_APPLICABLE: 1,
-                    FULLY_COMPLIED: 1,
-                    PARTIALLY_COMPLIED: 2,
-                    NOT_COMPLIED: 3,
-                };
-                const complianceScore = complianceScoreMap[row.complianceStatus] || 0;
+      res.status(200).json({
+        entities: entitiesWithFiles,
+        total: totalEntities,
+        page: parsedPage,
+        pageSize: parsedPageSize,
+      });
+    } else if (entityId) {
+      const entityWithFiles = await prisma.entity.findUnique({
+        where: { id: Number(entityId) },
+        include: {
+          files: true,
+        },
+      });
 
-                const finalRiskScore = (levelOfDocumentationScore * levelOfAutomationScore) * complianceScore;
-                const riskRating = getRiskRating(finalRiskScore);
+      if (!entityWithFiles) {
+        res.status(404).json({ error: "Entity not found." });
+        return;
+      }
 
-                return {
-                    ...row,
-                    srNo: row.srNo,
-                    applicability: (row.applicability || "").toUpperCase().replace(" ", "_"),
-                    overallControlDesignScore: levelOfDocumentationScore * levelOfAutomationScore || null,
-                    complianceScore: complianceScore || null,
-                    finalRiskScore,
-                    riskRating,
-                    isSubmitDisabled: false
-                };
-            });
-            setData(computedData);
-            // Clear changed rows tracking when fetching new data
-            changedRowsRef.current = {};
-        } catch (error) {
-            console.error(`Error fetching ${title} data:`, error);
-        } finally {
-            setLoading(false);
-        }
-    };
+      res.status(200).json({ entities: [entityWithFiles] });
+    } else {
+      res.status(400).json({
+        error: "Invalid query parameter. Provide 'entityId' or use 'all'.",
+      });
+    }
+  } catch (error) {
+    console.error("Error fetching entities and files:", error);
+    res.status(500).json({ error: "Failed to fetch entities and files." });
+  }
+});
 
-    const saveChanges = async (id, status) => {
-        const updatedRow = data.find((row) => row.id === id);
-        // Temporarily hold any errors to show to the user
-        const validationErrors = [];
 
-        // Validate only for "PENDING" state
-        if (status === "PENDING") {
-            for (const field of editableFields) {
-                const value = updatedRow[field];
-                const strValue = String(value || "").trim();
-                if (!strValue) {
-                    validationErrors.push(`Please fill the mandatory field: ${field}.`);
-                }
-            }
-        }
+adminRouter.get("/delete-file", async (req: Request, res: Response) => {
+  let result = deleteFileSchema.safeParse(req.query);
+  if (!result.success) {
+    res.status(400).json({
+      error: true,
+      message: result.error.errors[0].message
+    });
+    return;
+  }
+  const { fileId } = req.query;
 
-        // if validation fails, display the errors and stop submission
-        if (validationErrors.length > 0) {
-            setNotification({
-                isOpen: true,
-                type: 'warning',
-                message: "Please fill all the fields before submitting."
-            });
-            return;
-        }
-        updatedRow.status = status;
+  try {
+    if (!fileId) {
+      res.status(400).json({ error: "File ID is required." });
+    }
+    let filePath = "";
+    const file = await prisma.file.findUnique({
+      where: { id: Number(fileId) },
+    });
 
-        try {
-            // Proceed with the submission if validation passes
-            await apiRequest("POST", `/api/user/${apiEndpoint}`, updatedRow);
+    if (!file) {
+      res.status(404).json({ error: "File not found." });
+    } else {
+      filePath = path.join(__dirname, "../", file.path);
+    }
 
-            // Update the row state after successful submission
-            setData((prevData) =>
-                prevData.map((row) => {
-                    if (row.id === id) {
-                        return {
-                            ...row,
-                            isEditable: status !== "PENDING",
-                            isSubmitDisabled: status === "PENDING",
-                        };
-                    }
-                    return row;
-                })
-            );
+    try {
+      fs.unlinkSync(filePath);
+    } catch (deleteError) {
+      console.error("Error deleting file from disk:", deleteError);
+      res.status(500).json({ error: "Failed to delete the file from the server." });
+    }
 
-            // Remove from changed rows tracking after manual save
-            delete changedRowsRef.current[id];
+    await prisma.file.delete({ where: { id: Number(fileId) } });
 
-            setNotification({
-                isOpen: true,
-                type: 'success',
-                message: `${status === "NONE" || status === "REJECTED" ? "Saved" : "Submitted"} successfully!`
-            });
+    res.status(200).json({ message: "File deleted successfully." });
+  } catch (error) {
+    console.error("Error deleting file:", error);
+    res.status(500).json({ error: "Failed to delete the file." });
+  }
+});
 
-            setLastSaved(new Date());
-        } catch (error) {
-            console.error(`Error saving changes for ${title}:`, error);
-            setNotification({
-                isOpen: true,
-                type: 'error',
-                message: "Failed to Submit Changes. Please Try Again."
-            });
-        }
-    };
+adminRouter.post("/uploadDissemination", requireUser('ADMIN'), upload.array("attachments"), validateDissemination, uploadDissemination);
+// adminRouter.get("/getObligationsCirculars",  getObligationsCircularsAdmin);
+// adminRouter.post("/uploadCircularObligationsByID", validateRequest(uploadObligationsSchema), uploadObligationsAdmin);
 
-    // Filter data based on search input
-    const filteredData = data
-        .filter((row) => {
-            if (searchData) {
-                const lowerCaseSearch = searchData.toLowerCase();
-                return columnTitles.some((field) =>
-                    String(row[field] || "").toLowerCase().includes(lowerCaseSearch)
-                );
-            }
-            // Apply dropdown-based filters
-            if (showRejected) return row.status === "REJECTED";
-            if (showFilled) return row.status === "PENDING" || row.status === "APPROVED";
-            return row.status === "NONE"; // Default to Unfilled
-        })
-        .sort((a, b) => (a.srNo || 0) - (b.srNo || 0));
+// adminRouter.get("/getTempSavedObligations",  getTempSaveObligations);
+// adminRouter.post("/uploadTempObligations",validateRequest(uploadObligationsSchema), uploadTempSaveObligations);
 
-    return (
-        <div className="container"
-            style={{
-                maxWidth: "100%",
-                transition: "width 0.3s, margin-left 0.3s",
-            }}>
-            <div className="breadcrumb">
-                {getBreadcrumb().map((item, index) => (
-                    <span key={index} className={`breadcrumb-item ${index === getBreadcrumb().length - 1 ? "active" : ""}`}>
-                        {item}
-                        {index !== getBreadcrumb().length - 1 && <span className="separator"> &gt; </span>}
-                    </span>
-                ))}
-            </div>
-            <div className="controls">
-                <div className="left-layer-checker">
-                    {/* select bank */}
-                    <div className="control-group">
-                        <div className="bank-select">
-                            <label htmlFor="bankSelect" className="mr-2">Bank:</label>
-                            <select
-                                id="entitySelect"
-                                value={selectedEntity}
-                                onChange={(e) => {
-                                    setFetchBtnPressed(false)
-                                    setSelectedEntity(e.target.value);
-                                    setData([]);
-                                }}
-                                className="select"
-                                style={{ width: "200px" }}
-                            >
-                                <option value="">Select Bank</option>
-                                {entityList.map((entityVal) => (
-                                    <option key={entityVal.id} value={`${entityVal.name}:${entityVal.type}:${entityVal.year}`}>
-                                        {`${removeBankFromEnd(entityVal.name)} ${entityVal.type} ${entityVal.year}`}
-                                    </option>
-                                ))}
-                            </select>
-                        </div>
-                    </div>
-                    {/* fetch data  */}
-                    <button
-                        onClick={() => {
-                            fetchData(`${selectedEntity}`);
+// adminRouter.post("/uploadCertificate", uploadSelfCertification);
+// adminRouter.get("/getSavedCertificates", getUploadedCertificates);
 
-                        }}
-                        className="fetch-button"
-                        disabled={loading}
-                    >
-                        {loading ? "Loading..." : "Fetch Data"}
-                    </button>
-                    {/* input btn  */}
-                    <input
-                        type="text"
-                        placeholder="Search here"
-                        value={searchData}
-                        onChange={(e) => setSearchData(e.target.value)}
-                        className="search-input"
-                    />
-                </div>
-                <div className="right-layer-checker">
-                    <span className="mr-2">Filter by :</span>
-                    <select
-                        className="select"
-                        style={{ width: "100px" }}
-                        value={showRejected ? "REJECTED" : showFilled ? "APPROVED" : "NONE"} // default to none
-                        onChange={(e) => {
-                            const selectedValue = e.target.value;
-                            setShowRejected(selectedValue === "REJECTED");
-                            setShowFilled(selectedValue === "APPROVED");
-                        }}
-                    >
-                        <option value="NONE">Unfilled</option>
-                        <option value="APPROVED">Filled</option>
-                        <option value="REJECTED">Rejected</option>
-                    </select>
-                </div>
-            </div>
+// adminRouter.get("/Lam/getUsersDetails", getUsersDetailsLamAdmin);
+// adminRouter.patch("/Lam/updateUserDetails", updateUserDetailsLamAdmin);
 
-            {/* Last saved indicator */}
-            {lastSaved && (
-                <div className="last-saved-indicator" style={{ fontSize: '0.8rem', color: '#666', marginTop: '5px', textAlign: 'right' }}>
-                    Last auto-saved: {lastSaved.toLocaleTimeString()}
-                </div>
-            )}
-
-            {loading ? (
-                <p>Loading...</p>
-            ) : (
-                <div className="table-container">
-                    <table className="table">
-                        <thead>
-                            <tr>
-                                {fetchBtnPressed && columnTitles
-                                    .filter((title) => !(title === remarksField && !showRejected))
-                                    .map((title) => (
-                                        <th key={title} style={{ width: columnWidths[title] }}>
-                                            {title
-                                                .replace(/([A-Z])/g, " $1")
-                                                .trim()
-                                                .replace(/^./, (char) => char.toUpperCase())}
-                                        </th>
-                                    ))}
-                                {!showFilled && fetchBtnPressed && (
-                                    <>
-                                        <th style={{ width: "100px" }}>Save</th>
-                                        <th style={{ width: "100px" }}>Submit</th>
-                                    </>
-                                )}
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {filteredData
-                                .filter((row) => {
-                                    if (showRejected) return row.status === "REJECTED";
-                                    if (showFilled) return row.status === "APPROVED" || row.status === "PENDING";
-                                    return row.status === "NONE";
-                                })
-                                .map((row) => (
-                                    <tr key={row.id} className={changedRowsRef.current[row.id] ? "unsaved-changes" : ""}>
-                                        {columnTitles
-                                            .filter((field) => !(field === remarksField && !showRejected))
-                                            .map((field) => (
-                                                <td key={field} style={{ width: columnWidths[field] }}>
-                                                    {editableFields.includes(field) && row.isEditable ? (
-                                                        field === "applicability" ? (
-                                                            <select
-                                                                value={row[field] || ""}
-                                                                onChange={(e) => handleFieldChange(row.id, field, e.target.value)}
-                                                                className="select-editable"
-                                                            >
-                                                                <option value="">Select Applicability</option>
-                                                                {dropdownOptions[field]?.map((option) => (
-                                                                    <option key={option.value} value={option.value}>
-                                                                        {option.label}
-                                                                    </option>
-                                                                ))}
-                                                            </select>
-                                                        ) : (
-                                                            <textarea
-                                                                value={row[field] || ""}
-                                                                onChange={(e) => handleFieldChange(row.id, field, e.target.value)}
-                                                                className="textarea-editable"
-                                                                style={{
-                                                                    resize: "vertical",
-                                                                    minHeight: "80px",
-                                                                    maxHeight: "150px",
-                                                                }}
-                                                            />
-                                                        )
-                                                    ) : field === "circularExtract" ? (
-                                                        <div>
-                                                            {expandedRows.includes(row.id)
-                                                                ? row[field]
-                                                                : `${row[field].slice(0, 150)}`}
-                                                            {row[field].length > 100 && (
-                                                                <button
-                                                                    className="read-more-btn"
-                                                                    onClick={() => toggleExpand(row.id)}
-                                                                >
-                                                                    {expandedRows.includes(row.id)
-                                                                        ? "....Read Less"
-                                                                        : "....Read More"}
-                                                                </button>
-                                                            )}
-                                                        </div>
-                                                    ) : (
-                                                        row[field] || "-"
-                                                    )}
-                                                </td>
-                                            ))}
-                                        {/* Hide buttons for filled rows */}
-                                        {!showFilled && (
-                                            <>
-                                                <td>
-                                                    {row.isEditable && !row.isSubmitDisabled ? (
-                                                        <button
-                                                            onClick={() => saveChanges(row.id, showRejected ? "REJECTED" : "NONE")}
-                                                            className="save-button"
-                                                        >
-                                                            Save
-                                                        </button>
-                                                    ) : (
-                                                        <span className="no-action">No Actions</span>
-                                                    )}
-                                                </td>
-                                                <td>
-                                                    {row.isEditable ? (
-                                                        <button
-                                                            onClick={() => saveChanges(row.id, "PENDING")}
-                                                            className="save-button"
-                                                            disabled={row.isSubmitDisabled}
-                                                        >
-                                                            Submit
-                                                        </button>
-                                                    ) : (
-                                                        <span className="no-action">No Actions</span>
-                                                    )}
-                                                </td>
-                                            </>
-                                        )}
-                                    </tr>
-                                ))}
-                        </tbody>
-                    </table>
-                    {!filteredData.filter((row) =>
-                        showRejected ? row.status === "REJECTED" : row.status !== "REJECTED"
-                    ).length &&
-                        !loading && (
-                            <p className="px-4 py-4 text-center text-lg font-medium text-gray-700 bg-gray-100 rounded-lg shadow-md">
-                                {showRejected ? "No rejected data available." : "No pending data available."}
-                            </p>
-                        )}
-                </div>
-            )}
-            <ToastNotification
-                isOpen={notification.isOpen}
-                type={notification.type}
-                message={notification.message}
-                onClose={() => setNotification(prev => ({ ...prev, isOpen: false }))}
-            />
-        </div>
-    );
-};
-
-export default ExcelTableBCBS;
+export default adminRouter;
