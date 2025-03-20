@@ -1,582 +1,567 @@
-// uploadDissemination.jsx
-import React, { useRef, useEffect, useState } from 'react';
-import {
-  Upload,
-  Trash2,
-  FileText,
-  Plus,
-  Database,
-  AlertCircle,
-  Check
-} from 'lucide-react';
-import { columnTitles, dropdownOptions, defaultRegulatorOptions } from '../../../constants/dissemination';
-import { useDissemination } from './useDissemination';
-import { apiRequest } from '../../axios/apiRequest';
-import ToastNotification from '../../../helpers/ToastNotification';
-import { uploadDisseminationColumns, getColumnWidth, getColumnClassName } from './uploadDisseminationColumns';
-import '../../../css/uploadDissemination.css';
+import { useEffect, useState, useRef } from "react";
+import "../../../css/table.css";
+import { apiFormRequest } from "../../axios/apiFormRequest";
+import { apiRequest } from "../../axios/apiRequest";
+import { removeBankFromEnd } from "../commonFunctions";
+import ToastNotification from "../../../helpers/ToastNotification";
 
-// Validated input components
-const ValidatedTextInput = ({ value, onChange, validationClass, hasError, wasFixed }) => (
-  <div className="upload_diss_input_wrapper">
-    <input
-      type="text"
-      value={value || ""}
-      className={`upload_diss_textarea_editable ${validationClass}`}
-      onChange={onChange}
-    />
-    {hasError && (
-      <span className="upload_diss_validation_indicator error">
-        <AlertCircle size={16} />
-      </span>
-    )}
-    {wasFixed && !hasError && (
-      <span className="upload_diss_validation_indicator success">
-        <Check size={16} />
-      </span>
-    )}
-  </div>
-);
+const ExcelTableBCBS = ({
+    title,
+    apiEndpoint,
+    columnTitles,
+    columnWidths,
+    editableFields,
+    dropdownOptions,
+    remarksField,
+}) => {
+    const [data, setData] = useState([]);
+    const [searchData, setSearchData] = useState("");
+    const [entityList, setEntityList] = useState([]);
+    const [selectedEntity, setSelectedEntity] = useState("");
+    const [loading, setLoading] = useState(false);
+    const [showRejected, setShowRejected] = useState(false);
+    const [expandedRows, setExpandedRows] = useState([]);
+    const [fetchBtnPressed, setFetchBtnPressed] = useState(false);
+    const [showFilled, setShowFilled] = useState(false);
+    const [notification, setNotification] = useState({ isOpen: false, type: '', message: '' });
+    const [lastSaved, setLastSaved] = useState(null);
 
-const ValidatedSelectInput = ({ value, options, onChange, validationClass, hasError, wasFixed, includeDefaultOption = true }) => (
-  <div className="upload_diss_input_wrapper">
-    <select
-      value={value || ""}
-      className={`upload_diss_select_editable ${validationClass}`}
-      onChange={onChange}
-      style={{ paddingRight: '40px' }}
-    >
-      {includeDefaultOption && <option value="">Select</option>}
-      {options.map((option) => (
-        <option key={option.value} value={option.value}>
-          {option.label}
-        </option>
-      ))}
-    </select>
-    {hasError && (
-      <span className="upload_diss_validation_indicator error" style={{ right: '24px' }}> {/* Position adjusted */}
-        <AlertCircle size={16} />
-      </span>
-    )}
-    {wasFixed && !hasError && (
-      <span className="upload_diss_validation_indicator success" style={{ right: '24px' }}> {/* Position adjusted */}
-        <Check size={16} />
-      </span>
-    )}
-  </div>
-);
+    // Use refs to keep track of unsaved changes
+    const dataRef = useRef(data);
+    const changedRowsRef = useRef({});
+    const autosaveTimeoutRef = useRef(null);
+    const autosaveIntervalRef = useRef(null);
 
-// Modified date input to prevent calendar icon overlap
-const ValidatedDateInput = ({ value, onChange, validationClass, hasError, wasFixed }) => (
-  <div className="upload_diss_input_wrapper">
-    <input
-      type="date"
-      value={value || ""}
-      className={`upload_diss_date_picker ${validationClass}`}
-      onChange={onChange}
-      style={{ paddingRight: '40px' }} // Add extra padding to the right
-    />
-    {hasError && (
-      <span className="upload_diss_validation_indicator error" style={{ right: '24px' }}> {/* Position adjusted */}
-        <AlertCircle size={16} />
-      </span>
-    )}
-    {wasFixed && !hasError && (
-      <span className="upload_diss_validation_indicator success" style={{ right: '24px' }}> {/* Position adjusted */}
-        <Check size={16} />
-      </span>
-    )}
-  </div>
-);
+    // Update ref when data changes
+    useEffect(() => {
+        dataRef.current = data;
+    }, [data]);
 
-const UploadDissemination = () => {
-  const fileInputRef = useRef(null);
-  const [selectedFileName, setSelectedFileName] = useState('');
+    // Setup event listeners for page visibility and beforeunload
+    useEffect(() => {
+        // Save data when page becomes hidden (user switches tabs, minimizes window, etc.)
+        const handleVisibilityChange = () => {
+            if (document.visibilityState === 'hidden') {
+                autoSaveChangedRows(false);
+            }
+        };
 
-  const {
-    disseminations,
-    regulatorOptions,
-    setRegulatorOptions,
-    loading,
-    notification,
-    setNotification,
-    validationErrors,
-    fixedFields,
-    handleUploadFile,
-    addNewRow,
-    resetEntries,
-    handleInputChange,
-    handleSearchChange,
-    handleSelectCircular,
-    deleteRow,
-    handleSubmit,
-    getValidationClass,
-    getCellClass,
-  } = useDissemination(fileInputRef);
+        // Save data before user leaves/refreshes the page
+        const handleBeforeUnload = (e) => {
+            if (Object.keys(changedRowsRef.current).length > 0) {
+                autoSaveChangedRows(false);
+                // Modern browsers require returnValue to be set
+                e.preventDefault();
+                e.returnValue = '';
+                return '';
+            }
+        };
 
-  // clear file when upload dissemination is success
-  useEffect(() => {
-    if (notification.isOpen && notification.type === 'success') {
-      clearSelectedFile();
-    }
-  }, [notification]);
+        // Set up autosave interval (every 1 minute)
+        autosaveIntervalRef.current = setInterval(() => {
+            if (Object.keys(changedRowsRef.current).length > 0) {
+                autoSaveChangedRows(false);
+            }
+        }, 1 * 60 * 1000); // 1 minute in milliseconds
 
-  useEffect(() => {
-    const fetchRegulators = async () => {
-      try {
-        const endpoint = `${process.env.REACT_APP_BACKEND_URL}/api/user/regulators`;
-        const response = await apiRequest("GET", endpoint);
-        if (response.data.success) {
-          setRegulatorOptions([
-            ...defaultRegulatorOptions,
-            ...response.data.data.map((reg) => ({
-              value: reg.value,
-              label: reg.label
-            }))
-          ]);
-        }
-      } catch (error) {
-        console.error('Error fetching regulators:', error);
-      }
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+        window.addEventListener('beforeunload', handleBeforeUnload);
+
+        return () => {
+            document.removeEventListener('visibilitychange', handleVisibilityChange);
+            window.removeEventListener('beforeunload', handleBeforeUnload);
+            clearInterval(autosaveIntervalRef.current);
+            if (autosaveTimeoutRef.current) {
+                clearTimeout(autosaveTimeoutRef.current);
+            }
+        };
+    }, []);
+
+    const toggleExpand = (id) => {
+        setExpandedRows((prev) =>
+            prev.includes(id) ? prev.filter((rowId) => rowId !== id) : [...prev, id]
+        );
     };
 
-    fetchRegulators();
-  }, [setRegulatorOptions]);
+    // mapping finalRiskScore to riskRating 
+    const getRiskRating = (score) => {
+        if (score >= 1 && score <= 9) return "LOW";
+        if (score >= 10 && score <= 18) return "MEDIUM";
+        if (score >= 19 && score <= 27) return "HIGH";
+        if (score > 27) return "VERY_HIGH";
+        return null;
+    };
 
-  const handleFileChange = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      setSelectedFileName(file.name);
-      handleUploadFile(e);
-    }
-  };
+    const handleFieldChange = (id, field, value) => {
+        // Track which rows have been changed
+        changedRowsRef.current[id] = true;
 
-  const clearSelectedFile = () => {
-    setSelectedFileName('');
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
-    }
-  };
+        // Update the data state
+        setData((prevData) =>
+            prevData.map((row) =>
+                row.id === id ? { ...row, [field]: value } : row
+            )
+        );
 
-  const renderEmptyState = () => (
-    <div className="upload_diss_empty_state">
-      <Database size={48} className="upload_diss_empty_icon" />
-      <p className="upload_diss_empty_text">
-        Ready to upload your dissemination data? Add a new row to get started or upload an Excel file.
-      </p>
-      <button className="upload_diss_start_button" onClick={addNewRow}>
-        <Plus size={18} />
-        Add New Row
-      </button>
-    </div>
-  );
+        // Set up debounced autosave (wait 3 seconds after last edit)
+        if (autosaveTimeoutRef.current) {
+            clearTimeout(autosaveTimeoutRef.current);
+        }
 
-  return (
-    <div className="upload_diss_container">
-      <h2 className="h2-heading">Upload Dissemination</h2>
-      <div className="upload_diss_button_container flex justify-between">
-        <div>
-          <div className="upload_diss_file_input_wrapper">
-            <label className="upload_diss_file_upload">
-              <Upload size={18} className="upload_diss_file_upload_icon" />
-              Upload Excel File
-              <input
-                type="file"
-                accept=".xlsx"
-                onChange={handleFileChange}
-                ref={fileInputRef}
-                className="upload_diss_file_input"
-              />
-            </label>
-            {selectedFileName && (
-              <div className="upload_diss_file_name_container">
-                <span className="upload_diss_file_name">
-                  <FileText size={16} className="upload_diss_file_name_icon" />
-                  {selectedFileName}
-                </span>
-                <button
-                  className="upload_diss_file_clear"
-                  onClick={clearSelectedFile}
-                  title="Clear selected file"
-                >
-                  <Trash2 size={16} />
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
+        autosaveTimeoutRef.current = setTimeout(() => {
+            autoSaveChangedRows(false);
+        }, 3000); // 3 seconds debounce
+    };
 
-        {disseminations.length > 0 && (
-          <div className="upload_diss_action_buttons">
-            <button className="upload_diss_fetch_button flex flex-row" onClick={addNewRow}>
-              <Plus size={18} style={{ marginRight: '5px' }} />
-              <span>Add New Row</span>
-            </button>
-            <button
-              className="upload_diss_clear_btn"
-              onClick={resetEntries}
-            >
-              Clear
-            </button>
-          </div>
-        )}
-      </div>
+    // Function to autosave all changed rows
+    // showToast parameter controls whether to show notifications
+    const autoSaveChangedRows = async (showToast = true) => {
+        const changedIds = Object.keys(changedRowsRef.current);
 
-      <div id='table-dissemination' className="upload_diss_table_container">
-        {disseminations.length === 0 ? (
-          renderEmptyState()
-        ) : (
-          <table className="upload_diss_table">
-            <thead>
-              <tr>
-                {uploadDisseminationColumns.map(column => (
-                  <th
-                    key={column.id}
-                    style={{ width: column.width }}
-                    className={column.className}
-                  >
-                    {column.label}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {disseminations.map((row, index) => {
-                const errorRow = validationErrors.find((ve) => ve?.index === index);
-                const rowValidation = errorRow?.errors || {};
+        if (changedIds.length === 0) return;
 
-                return (
-                  <tr key={index}>
-                    <td style={{ width: getColumnWidth('action') }}>
-                      <button
-                        className="upload_diss_delete_row_btn"
-                        onClick={() => deleteRow(index)}
-                        title="Delete row"
-                      >
-                        <Trash2 size={18} />
-                      </button>
-                    </td>
-                    {columnTitles.map((field) => {
-                      // Get validation state for this field
-                      const validationClass = getValidationClass(index, field);
-                      const cellClass = getCellClass(index, field);
-                      const hasError = rowValidation[field];
-                      const wasFixed = fixedFields[`${index}-${field}`];
+        let savedCount = 0;
+        let errorCount = 0;
 
-                      // Set column style
-                      const columnStyle = {
-                        width: getColumnWidth(field)
-                      };
+        for (const id of changedIds) {
+            const rowToSave = dataRef.current.find(row => row.id === id);
+            if (!rowToSave || rowToSave.isSubmitDisabled) continue;
 
-                      // Regulator field
-                      if (field === "regulator") {
-                        return (
-                          <td
-                            key={field}
-                            style={columnStyle}
-                            className={`${getColumnClassName(field)} ${cellClass}`}
-                          >
-                            <ValidatedSelectInput
-                              value={row.regulator}
-                              options={regulatorOptions}
-                              onChange={(e) => handleInputChange(index, "regulator", e.target.value)}
-                              validationClass={validationClass}
-                              hasError={hasError}
-                              wasFixed={wasFixed}
-                              includeDefaultOption={false} // to avoid double select bug 
-                            />
-                            {row.regulator === "Custom" && (
-                              <div className="mt-2">
-                                <ValidatedTextInput
-                                  value={row.customRegulator}
-                                  onChange={(e) => handleInputChange(index, "customRegulator", e.target.value)}
-                                  validationClass={getValidationClass(index, "customRegulator")}
-                                  hasError={rowValidation.customRegulator}
-                                  wasFixed={fixedFields[`${index}-customRegulator`]}
-                                />
-                              </div>
-                            )}
-                          </td>
-                        );
-                      }
+            try {
+                // Only auto-save with current status (don't submit)
+                const currentStatus = rowToSave.status || 'NONE';
+                const saveStatus = currentStatus === 'PENDING' ? 'PENDING' :
+                    currentStatus === 'REJECTED' ? 'REJECTED' : 'NONE';
 
-                      if (field === "gist") {
-                        return (
-                          <td
-                            key={field}
-                            style={columnStyle}
-                            className={`${getColumnClassName(field)} ${cellClass}`}
-                          >
-                            <textarea
-                              value={row.gist}
-                              onChange={(e) => handleInputChange(index, "gist", e.target.value)}
-                              className="custom-textarea"
-                            />
-                          </td>
-                        );
-                      }
+                await apiRequest("POST", `/api/user/${apiEndpoint}`, {
+                    ...rowToSave,
+                    status: saveStatus
+                });
 
+                savedCount++;
+                delete changedRowsRef.current[id];
+            } catch (error) {
+                console.error(`Error auto-saving row ${id}:`, error);
+                errorCount++;
+            }
+        }
 
-                      if (field === "applicability") {
-                        return (
-                          <td
-                            key={field}
-                            style={columnStyle}
-                            className={`${getColumnClassName(field)} ${cellClass}`}
-                          >
-                            <textarea
-                              value={row.applicability}
-                              onChange={(e) => handleInputChange(index, "applicability", e.target.value)}
-                              className="custom-textarea"
-                            />
-                          </td>
-                        );
-                      }
+        // Only show notification if explicitly requested (manual save button click)
+        if (showToast && (savedCount > 0 || errorCount > 0)) {
+            setNotification({
+                isOpen: true,
+                type: errorCount ? 'warning' : 'success',
+                message: errorCount
+                    ? `Auto-saved ${savedCount} items. Failed to save ${errorCount} items.`
+                    : `Auto-saved ${savedCount} items successfully.`,
+                id: Date.now()
+            });
+        }
 
-                      // Circular Date field
-                      if (field === "circularDate") {
-                        return (
-                          <td
-                            key={field}
-                            style={columnStyle}
-                            className={`${getColumnClassName(field)} ${cellClass}`}
-                          >
-                            <ValidatedDateInput
-                              value={row[field]}
-                              onChange={(e) => handleInputChange(index, field, e.target.value)}
-                              validationClass={validationClass}
-                              hasError={hasError}
-                              wasFixed={wasFixed}
-                            />
-                          </td>
-                        );
-                      }
+        if (savedCount > 0) {
+            setLastSaved(new Date());
+        }
+    };
 
-                      // Regulatory Deadline field
-                      if (field === "regulatoryDeadline") {
-                        return (
-                          <td
-                            key={field}
-                            style={columnStyle}
-                            className={`${getColumnClassName(field)} ${cellClass}`}
-                          >
-                            {row.regulatoryTimelines === "YES" ? (
-                              <ValidatedDateInput
-                                value={row[field]}
-                                onChange={(e) => handleInputChange(index, field, e.target.value)}
-                                validationClass={validationClass}
-                                hasError={hasError}
-                                wasFixed={wasFixed}
-                              />
-                            ) : (
-                              <p>NA</p>
-                            )}
-                          </td>
-                        );
-                      }
+    const getBreadcrumb = () => {
+        let breadcrumb = ["Quality Assurance", "BCBS"];
 
-                      // Dropdown fields
-                      if (dropdownOptions[field]) {
-                        return (
-                          <td
-                            key={field}
-                            style={columnStyle}
-                            className={`${getColumnClassName(field)} ${cellClass}`}
-                          >
-                            <ValidatedSelectInput
-                              value={row[field]}
-                              options={dropdownOptions[field]}
-                              onChange={(e) => handleInputChange(index, field, e.target.value)}
-                              validationClass={validationClass}
-                              hasError={hasError}
-                              wasFixed={wasFixed}
-                            />
-                          </td>
-                        );
-                      }
+        if (selectedEntity) {
+            breadcrumb.push(selectedEntity.replace(/:/g, " "));
+            if (showRejected) {
+                breadcrumb.push("Rejected");
+            } else if (showFilled) {
+                breadcrumb.push("Filled");
+            } else {
+                breadcrumb.push("Unfilled");
+            }
+        }
+        return breadcrumb
+    };
 
-                      // Related Circular Numbers field
-                      if (field === "relatedCircularNumbers") {
-                        return (
-                          <td
-                            key={field}
-                            style={columnStyle}
-                            className={`${getColumnClassName(field)} ${cellClass}`}
-                          >
-                            {row.linkedToEarlierCircular === "YES" ? (
-                              <div className="upload_diss_search_wrapper">
-                                <div className="upload_diss_input_wrapper">
-                                  <input
-                                    type="text"
-                                    placeholder="Search circulars..."
-                                    value={row.searchTerm || ""}
-                                    onChange={(e) => handleSearchChange(index, "searchTerm", e.target.value)}
-                                    className={`upload_diss_search_input ${validationClass}`}
-                                  />
-                                  {hasError && (
-                                    <span className="upload_diss_validation_indicator error">
-                                      <AlertCircle size={16} />
-                                    </span>
-                                  )}
-                                  {wasFixed && !hasError && (
-                                    <span className="upload_diss_validation_indicator success">
-                                      <Check size={16} />
-                                    </span>
-                                  )}
-                                </div>
+    useEffect(() => {
+        const fetchEntity = async () => {
+            try {
+                const response = await apiRequest("GET", "/api/user/entity");
+                setEntityList(response.data.entity);
+            } catch (error) {
+                console.error("Error fetching entity:", error);
+            }
+        };
 
-                                {row.searchedResult?.length > 0 && (
-                                  <div className="upload_diss_search_results">
-                                    {row.searchedResult.map((circular) => (
-                                      <div
-                                        key={circular.id}
-                                        className="upload_diss_search_result"
-                                        onClick={() => {
-                                          handleSelectCircular(index, circular);
-                                          handleSearchChange(index, "searchTerm", "");
-                                        }}
-                                      >
-                                        <span>{circular.circularTitle}</span>
-                                      </div>
-                                    ))}
-                                  </div>
-                                )}
-                                <div className="mt-2 flex flex-wrap gap-2">
-                                  {Array.isArray(row.relatedCircularNumbers) && row.relatedCircularNumbers.map((id) => (
-                                    <span
-                                      key={id}
-                                      className="upload_diss_circular_tag"
-                                    >
-                                      <span className="upload_diss_circular_tag_text">{id}</span>
-                                      <button
-                                        onClick={() => {
-                                          handleInputChange(
-                                            index,
-                                            "relatedCircularNumbers",
-                                            row.relatedCircularNumbers.filter(
-                                              (existingId) => existingId !== id
-                                            )
-                                          );
-                                        }}
-                                        className="upload_diss_circular_tag_remove"
-                                      >
-                                        ×
-                                      </button>
-                                    </span>
-                                  ))}
-                                </div>
-                              </div>
-                            ) : (
-                              <p>NA</p>
-                            )}
-                          </td>
-                        );
-                      }
+        fetchEntity();
+    }, []);
 
-                      // Attachment field
-                      if (field === "attachment") {
-                        return (
-                          <td
-                            key={field}
-                            style={columnStyle}
-                            className={`${getColumnClassName(field)} ${cellClass}`}
-                          >
-                            <div className="upload_diss_input_wrapper">
-                              <label className="upload_diss_file_upload" style={{ fontSize: '13px', padding: '6px 12px' }}>
-                                <Upload size={14} className="upload_diss_file_upload_icon" />
-                                {row[field] ? 'Change File' : 'Choose File'}
-                                <input
-                                  type="file"
-                                  accept=".pdf,.xlsx,.doc,.docx,.jpeg,.jpg,.png"
-                                  onChange={(e) => {
-                                    const file = e.target.files?.[0];
-                                    const allowedTypes = [
-                                      "application/pdf",
-                                      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                      "application/msword",
-                                      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                                      "image/jpeg",
-                                      "image/png",
-                                    ];
+    const fetchData = async (selectedEntity) => {
+        if (selectedEntity === "") {
+            setNotification({
+                isOpen: true,
+                type: 'warning',
+                message: "Please Select an Entity First."
+            });
+            return;
+        }
+        setFetchBtnPressed(true)
+        const selectedEntityDetails = selectedEntity.split(":");
+        setLoading(true);
+        try {
+            const response = await apiFormRequest("GET", `/api/user/${apiEndpoint}`, { entityName: selectedEntityDetails[0], type: selectedEntityDetails[1], year: parseInt(selectedEntityDetails[2]) });
+            const dataWithEditState = response.data.map((row) => ({
+                ...row,
+                isEditable: row.status !== "PENDING",
+                isSubmitDisabled: row.status === "PENDING", // Disable if already submitted
+            }));
 
-                                    if (file && allowedTypes.includes(file.type)) {
-                                      handleInputChange(index, "attachment", file);
-                                    } else {
-                                      setNotification({
-                                        isOpen: true,
-                                        type: 'error',
-                                        message: "Invalid file type. Please upload a valid file."
-                                      });
-                                    }
-                                  }}
-                                  className="upload_diss_file_input"
-                                />
-                              </label>
-                              {hasError && (
-                                <span className="upload_diss_validation_indicator error" style={{ top: '16px', right: '12px' }}>
-                                  <AlertCircle size={16} />
-                                </span>
-                              )}
-                              {wasFixed && !hasError && (
-                                <span className="upload_diss_validation_indicator success" style={{ top: '16px', right: '12px' }}>
-                                  <Check size={16} />
-                                </span>
-                              )}
-                              {row[field] && (
-                                <span className="upload_diss_file_name" style={{ display: 'block', marginTop: '4px' }}>
-                                  {row[field].name}
-                                </span>
-                              )}
-                            </div>
-                          </td>
-                        );
-                      }
+            // Compute initial finalRiskScore and riskRating for all rows on load
+            const computedData = dataWithEditState.map((row) => {
+                const levelOfDocumentationScore = {
+                    ADEQUATELY_DOCUMENTED: 1,
+                    INADEQUATELY_DOCUMENTED: 2,
+                    NOT_DOCUMENTED: 3,
+                }[row.levelOfDocumentationOfControl] || 0;
 
-                      // Default text input for remaining fields
-                      return (
-                        <td
-                          key={field}
-                          style={columnStyle}
-                          className={`${getColumnClassName(field)} ${cellClass}`}
-                        >
-                          <ValidatedTextInput
-                            value={row[field]}
-                            onChange={(e) => handleInputChange(index, field, e.target.value)}
-                            validationClass={validationClass}
-                            hasError={hasError}
-                            wasFixed={wasFixed}
-                          />
-                        </td>
-                      );
-                    })}
-                  </tr>
+                const levelOfAutomationScore = {
+                    AUTOMATED: 1,
+                    SEMI_AUTOMATED: 2,
+                    MANUAL: 3,
+                }[row.levelOfAutomationOfControl] || 0;
+
+                const complianceScoreMap = {
+                    NOT_APPLICABLE: 1,
+                    FULLY_COMPLIED: 1,
+                    PARTIALLY_COMPLIED: 2,
+                    NOT_COMPLIED: 3,
+                };
+                const complianceScore = complianceScoreMap[row.complianceStatus] || 0;
+
+                const finalRiskScore = (levelOfDocumentationScore * levelOfAutomationScore) * complianceScore;
+                const riskRating = getRiskRating(finalRiskScore);
+
+                return {
+                    ...row,
+                    srNo: row.srNo,
+                    applicability: (row.applicability || "").toUpperCase().replace(" ", "_"),
+                    overallControlDesignScore: levelOfDocumentationScore * levelOfAutomationScore || null,
+                    complianceScore: complianceScore || null,
+                    finalRiskScore,
+                    riskRating,
+                    isSubmitDisabled: false
+                };
+            });
+            setData(computedData);
+            // Clear changed rows tracking when fetching new data
+            changedRowsRef.current = {};
+        } catch (error) {
+            console.error(`Error fetching ${title} data:`, error);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const saveChanges = async (id, status) => {
+        const updatedRow = data.find((row) => row.id === id);
+        // Temporarily hold any errors to show to the user
+        const validationErrors = [];
+
+        // Validate only for "PENDING" state
+        if (status === "PENDING") {
+            for (const field of editableFields) {
+                const value = updatedRow[field];
+                const strValue = String(value || "").trim();
+                if (!strValue) {
+                    validationErrors.push(`Please fill the mandatory field: ${field}.`);
+                }
+            }
+        }
+
+        // if validation fails, display the errors and stop submission
+        if (validationErrors.length > 0) {
+            setNotification({
+                isOpen: true,
+                type: 'warning',
+                message: "Please fill all the fields before submitting."
+            });
+            return;
+        }
+        updatedRow.status = status;
+
+        try {
+            // Proceed with the submission if validation passes
+            await apiRequest("POST", `/api/user/${apiEndpoint}`, updatedRow);
+
+            // Update the row state after successful submission
+            setData((prevData) =>
+                prevData.map((row) => {
+                    if (row.id === id) {
+                        return {
+                            ...row,
+                            isEditable: status !== "PENDING",
+                            isSubmitDisabled: status === "PENDING",
+                        };
+                    }
+                    return row;
+                })
+            );
+
+            // Remove from changed rows tracking after manual save
+            delete changedRowsRef.current[id];
+
+            setNotification({
+                isOpen: true,
+                type: 'success',
+                message: `${status === "NONE" || status === "REJECTED" ? "Saved" : "Submitted"} successfully!`
+            });
+
+            setLastSaved(new Date());
+        } catch (error) {
+            console.error(`Error saving changes for ${title}:`, error);
+            setNotification({
+                isOpen: true,
+                type: 'error',
+                message: "Failed to Submit Changes. Please Try Again."
+            });
+        }
+    };
+
+    // Filter data based on search input
+    const filteredData = data
+        .filter((row) => {
+            if (searchData) {
+                const lowerCaseSearch = searchData.toLowerCase();
+                return columnTitles.some((field) =>
+                    String(row[field] || "").toLowerCase().includes(lowerCaseSearch)
                 );
-              })}
-            </tbody>
-          </table>
-        )}
-      </div>
+            }
+            // Apply dropdown-based filters
+            if (showRejected) return row.status === "REJECTED";
+            if (showFilled) return row.status === "PENDING" || row.status === "APPROVED";
+            return row.status === "NONE"; // Default to Unfilled
+        })
+        .sort((a, b) => (a.srNo || 0) - (b.srNo || 0));
 
-      <div className="upload_diss_button_content_container">
-        <button
-          onClick={() => {
-            handleSubmit()
-          }}
-          className="upload_diss_fetch_button"
-          disabled={loading || disseminations.length === 0}
-        >
-          {loading ? "Uploading..." : "Upload"}
-        </button>
-      </div>
+    return (
+        <div className="container"
+            style={{
+                maxWidth: "100%",
+                transition: "width 0.3s, margin-left 0.3s",
+            }}>
+            <div className="breadcrumb">
+                {getBreadcrumb().map((item, index) => (
+                    <span key={index} className={`breadcrumb-item ${index === getBreadcrumb().length - 1 ? "active" : ""}`}>
+                        {item}
+                        {index !== getBreadcrumb().length - 1 && <span className="separator"> &gt; </span>}
+                    </span>
+                ))}
+            </div>
+            <div className="controls">
+                <div className="left-layer-checker">
+                    {/* select bank */}
+                    <div className="control-group">
+                        <div className="bank-select">
+                            <label htmlFor="bankSelect" className="mr-2">Bank:</label>
+                            <select
+                                id="entitySelect"
+                                value={selectedEntity}
+                                onChange={(e) => {
+                                    setFetchBtnPressed(false)
+                                    setSelectedEntity(e.target.value);
+                                    setData([]);
+                                }}
+                                className="select"
+                                style={{ width: "200px" }}
+                            >
+                                <option value="">Select Bank</option>
+                                {entityList.map((entityVal) => (
+                                    <option key={entityVal.id} value={`${entityVal.name}:${entityVal.type}:${entityVal.year}`}>
+                                        {`${removeBankFromEnd(entityVal.name)} ${entityVal.type} ${entityVal.year}`}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+                    </div>
+                    {/* fetch data  */}
+                    <button
+                        onClick={() => {
+                            fetchData(`${selectedEntity}`);
 
-      <ToastNotification
-        isOpen={notification.isOpen}
-        type={notification.type}
-        message={notification.message}
-        onClose={() => setNotification(prev => ({ ...prev, isOpen: false }))}
-      />
-    </div>
-  );
+                        }}
+                        className="fetch-button"
+                        disabled={loading}
+                    >
+                        {loading ? "Loading..." : "Fetch Data"}
+                    </button>
+                    {/* input btn  */}
+                    <input
+                        type="text"
+                        placeholder="Search here"
+                        value={searchData}
+                        onChange={(e) => setSearchData(e.target.value)}
+                        className="search-input"
+                    />
+                </div>
+                <div className="right-layer-checker">
+                    <span className="mr-2">Filter by :</span>
+                    <select
+                        className="select"
+                        style={{ width: "100px" }}
+                        value={showRejected ? "REJECTED" : showFilled ? "APPROVED" : "NONE"} // default to none
+                        onChange={(e) => {
+                            const selectedValue = e.target.value;
+                            setShowRejected(selectedValue === "REJECTED");
+                            setShowFilled(selectedValue === "APPROVED");
+                        }}
+                    >
+                        <option value="NONE">Unfilled</option>
+                        <option value="APPROVED">Filled</option>
+                        <option value="REJECTED">Rejected</option>
+                    </select>
+                </div>
+            </div>
+
+            {/* Last saved indicator */}
+            {lastSaved && (
+                <div className="last-saved-indicator" style={{ fontSize: '0.8rem', color: '#666', marginTop: '5px', textAlign: 'right' }}>
+                    Last auto-saved: {lastSaved.toLocaleTimeString()}
+                </div>
+            )}
+
+            {loading ? (
+                <p>Loading...</p>
+            ) : (
+                <div className="table-container">
+                    <table className="table">
+                        <thead>
+                            <tr>
+                                {fetchBtnPressed && columnTitles
+                                    .filter((title) => !(title === remarksField && !showRejected))
+                                    .map((title) => (
+                                        <th key={title} style={{ width: columnWidths[title] }}>
+                                            {title
+                                                .replace(/([A-Z])/g, " $1")
+                                                .trim()
+                                                .replace(/^./, (char) => char.toUpperCase())}
+                                        </th>
+                                    ))}
+                                {!showFilled && fetchBtnPressed && (
+                                    <>
+                                        <th style={{ width: "100px" }}>Save</th>
+                                        <th style={{ width: "100px" }}>Submit</th>
+                                    </>
+                                )}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {filteredData
+                                .filter((row) => {
+                                    if (showRejected) return row.status === "REJECTED";
+                                    if (showFilled) return row.status === "APPROVED" || row.status === "PENDING";
+                                    return row.status === "NONE";
+                                })
+                                .map((row) => (
+                                    <tr key={row.id} className={changedRowsRef.current[row.id] ? "unsaved-changes" : ""}>
+                                        {columnTitles
+                                            .filter((field) => !(field === remarksField && !showRejected))
+                                            .map((field) => (
+                                                <td key={field} style={{ width: columnWidths[field] }}>
+                                                    {editableFields.includes(field) && row.isEditable ? (
+                                                        field === "applicability" ? (
+                                                            <select
+                                                                value={row[field] || ""}
+                                                                onChange={(e) => handleFieldChange(row.id, field, e.target.value)}
+                                                                className="select-editable"
+                                                            >
+                                                                <option value="">Select Applicability</option>
+                                                                {dropdownOptions[field]?.map((option) => (
+                                                                    <option key={option.value} value={option.value}>
+                                                                        {option.label}
+                                                                    </option>
+                                                                ))}
+                                                            </select>
+                                                        ) : (
+                                                            <textarea
+                                                                value={row[field] || ""}
+                                                                onChange={(e) => handleFieldChange(row.id, field, e.target.value)}
+                                                                className="textarea-editable"
+                                                                style={{
+                                                                    resize: "vertical",
+                                                                    minHeight: "80px",
+                                                                    maxHeight: "150px",
+                                                                }}
+                                                            />
+                                                        )
+                                                    ) : field === "circularExtract" ? (
+                                                        <div>
+                                                            {expandedRows.includes(row.id)
+                                                                ? row[field]
+                                                                : `${row[field].slice(0, 150)}`}
+                                                            {row[field].length > 100 && (
+                                                                <button
+                                                                    className="read-more-btn"
+                                                                    onClick={() => toggleExpand(row.id)}
+                                                                >
+                                                                    {expandedRows.includes(row.id)
+                                                                        ? "....Read Less"
+                                                                        : "....Read More"}
+                                                                </button>
+                                                            )}
+                                                        </div>
+                                                    ) : (
+                                                        row[field] || "-"
+                                                    )}
+                                                </td>
+                                            ))}
+                                        {/* Hide buttons for filled rows */}
+                                        {!showFilled && (
+                                            <>
+                                                <td>
+                                                    {row.isEditable && !row.isSubmitDisabled ? (
+                                                        <button
+                                                            onClick={() => saveChanges(row.id, showRejected ? "REJECTED" : "NONE")}
+                                                            className="save-button"
+                                                        >
+                                                            Save
+                                                        </button>
+                                                    ) : (
+                                                        <span className="no-action">No Actions</span>
+                                                    )}
+                                                </td>
+                                                <td>
+                                                    {row.isEditable ? (
+                                                        <button
+                                                            onClick={() => saveChanges(row.id, "PENDING")}
+                                                            className="save-button"
+                                                            disabled={row.isSubmitDisabled}
+                                                        >
+                                                            Submit
+                                                        </button>
+                                                    ) : (
+                                                        <span className="no-action">No Actions</span>
+                                                    )}
+                                                </td>
+                                            </>
+                                        )}
+                                    </tr>
+                                ))}
+                        </tbody>
+                    </table>
+                    {!filteredData.filter((row) =>
+                        showRejected ? row.status === "REJECTED" : row.status !== "REJECTED"
+                    ).length &&
+                        !loading && (
+                            <p className="px-4 py-4 text-center text-lg font-medium text-gray-700 bg-gray-100 rounded-lg shadow-md">
+                                {showRejected ? "No rejected data available." : "No pending data available."}
+                            </p>
+                        )}
+                </div>
+            )}
+            <ToastNotification
+                isOpen={notification.isOpen}
+                type={notification.type}
+                message={notification.message}
+                onClose={() => setNotification(prev => ({ ...prev, isOpen: false }))}
+            />
+        </div>
+    );
 };
 
-export default UploadDissemination;
+export default ExcelTableBCBS;
