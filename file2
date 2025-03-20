@@ -15,6 +15,13 @@ const prisma = new PrismaClient();
 
 const adminRouter = Router();
 
+const UPLOADS_DIR = "/var/www/uploads"; // New uploads path
+
+// Ensure uploads directory exists
+if (!fs.existsSync(UPLOADS_DIR)) {
+  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+}
+
 adminRouter.post("/add-entity", async (req, res) => {
   let result = addEntitySchema.safeParse(req.body);
   if (!result.success) {
@@ -128,15 +135,11 @@ adminRouter.delete("/delete-entity", async (req, res) => {
 
 const storage: StorageEngine = multer.diskStorage({
   destination: (req, file, cb) => {
-    const uploadDir = path.join(__dirname, "../uploads");
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
-    cb(null, uploadDir);
+    cb(null, UPLOADS_DIR);
   },
   filename: (req, file, cb) => {
-    const uniqueSuffix = `${Date.now()}`;
-    cb(null, `${uniqueSuffix}-${file.originalname}`);
+    const uniqueSuffix = `${Date.now()}-${file.originalname}`;
+    cb(null, uniqueSuffix);
   },
 });
 
@@ -157,111 +160,57 @@ const upload = multer({
   },
 });
 
-adminRouter.post(
-  "/upload-file",
-  upload.single("file"),
-  async (req: Request, res: Response) => {
-    const deleteUploadedFile = (filePath: string) => {
-      try {
-        if (fs.existsSync(filePath)) {
-          fs.unlinkSync(filePath);
-        }
-      } catch (error) {
-        console.error("Error deleting uploaded file:", error);
-      }
-    };
+
+adminRouter.post("/upload-file", upload.single("file"), async (req: Request, res: Response) => {
+  try {
+    const { entityId } = req.query;
+    if (!entityId) {
+      if (req.file) deleteUploadedFile(path.join(UPLOADS_DIR, req.file.filename));
+      return res.status(400).json({ error: "Entity ID is required." });
+    }
+
+    const entity = await prisma.entity.findUnique({ where: { id: Number(entityId) } });
+    if (!entity) {
+      if (req.file) deleteUploadedFile(path.join(UPLOADS_DIR, req.file.filename));
+      return res.status(404).json({ error: "Entity not found." });
+    }
+
+    const existingFile = await prisma.file.findFirst({ where: { entityId: entity.id } });
+    if (existingFile) {
+      if (req.file) deleteUploadedFile(path.join(UPLOADS_DIR, req.file.filename));
+      return res.status(400).json({ error: `Entity already has a file: "${existingFile.name}".` });
+    }
+
+    if (!req.file) return res.status(400).json({ error: "No file uploaded." });
+
+    const { originalname, filename, mimetype, size } = req.file;
+    const filePath = path.join(UPLOADS_DIR, filename);
 
     try {
-      const { entityId } = req.query;
+      const file = await prisma.file.create({
+        data: { name: originalname, path: filePath, mimeType: mimetype, size, entityId: entity.id },
+      });
 
-      if (!entityId) {
-        if (req.file) {
-          deleteUploadedFile(path.join(__dirname, "../uploads", req.file.filename));
-        }
-        res.status(400).json({ error: "Entity ID is required." });
-        return;
-      }
-
-      const entity = await prisma.entity.findUnique({ where: { id: Number(entityId) } });
-      if (!entity) {
-        if (req.file) {
-          deleteUploadedFile(path.join(__dirname, "../uploads", req.file.filename));
-        }
-        res.status(404).json({ error: "Entity not found." });
-        return;
-      }
-
-      const existingFile = await prisma.file.findFirst({ where: { entityId: entity.id } });
-      if (existingFile) {
-        if (req.file) {
-          deleteUploadedFile(path.join(__dirname, "../uploads", req.file.filename));
-        }
-        res.status(400).json({
-          error: `The entity already has an associated file: "${existingFile.name}". Delete the existing file to upload a new one.`,
-        });
-        return;
-      }
-
-      if (!req.file) {
-        res.status(400).json({ error: "No file uploaded." });
-        return;
-      }
-
-      const { originalname, filename, mimetype, size } = req.file;
-      const filePath = path.join("uploads", filename);
-
-      try {
-        const file = await prisma.file.create({
-          data: {
-            name: originalname,
-            path: filePath,
-            mimeType: mimetype,
-            size,
-            entityId: entity.id,
-          },
-        });
-
-        res.status(201).json({ message: "File uploaded successfully.", file });
-      } catch (dbError) {
-        console.error("Error saving file to database:", dbError);
-        if (req.file) {
-          deleteUploadedFile(path.join(__dirname, "../uploads", req.file.filename));
-        }
-        res.status(500).json({ error: "Failed to save the file to the database." });
-      }
-    } catch (error) {
-      console.error("Error uploading file:", error);
-      if (req.file) {
-        const filePath = path.join(__dirname, "../uploads", req.file.filename);
-        deleteUploadedFile(filePath);
-      }
-      res.status(500).json({ error: "Failed to upload the file." });
+      return res.status(201).json({ message: "File uploaded successfully.", file });
+    } catch (dbError) {
+      console.error("Error saving file to database:", dbError);
+      deleteUploadedFile(path.join(UPLOADS_DIR, filename));
+      return res.status(500).json({ error: "Failed to save the file." });
     }
+  } catch (error) {
+    console.error("Error uploading file:", error);
+    if (req.file) deleteUploadedFile(path.join(UPLOADS_DIR, req.file.filename));
+    return res.status(500).json({ error: "Failed to upload the file." });
   }
-);
+});
 
 adminRouter.get("/get-entities-files", async (req: Request, res: Response) => {
-  let result = getEntitiesFilesSchema.safeParse(req.query);
-  if (!result.success) {
-    res.status(400).json({
-      error: true,
-      message: result.error.errors[0].message
-    });
-    return;
-  }
   const { entityId, page, pageSize } = req.query;
-
   const parsedPage = page ? Number(page) : 1;
   const parsedPageSize = pageSize ? Number(pageSize) : 10;
 
-  if (isNaN(parsedPage) || parsedPage < 1) {
-    res.status(400).json({ error: "Invalid 'page' parameter. Must be a positive number." });
-    return;
-  }
-
-  if (isNaN(parsedPageSize) || parsedPageSize < 1) {
-    res.status(400).json({ error: "Invalid 'pageSize' parameter. Must be a positive number." });
-    return;
+  if (isNaN(parsedPage) || parsedPage < 1 || isNaN(parsedPageSize) || parsedPageSize < 1) {
+    return res.status(400).json({ error: "Invalid pagination parameters." });
   }
 
   try {
@@ -271,95 +220,49 @@ adminRouter.get("/get-entities-files", async (req: Request, res: Response) => {
       const entitiesWithFiles = await prisma.entity.findMany({
         skip,
         take: parsedPageSize,
-        where: {
-          files: {
-            some: {},
-          },
-        },
-        include: {
-          files: true,
-        },
+        where: { files: { some: {} } },
+        include: { files: true },
       });
 
-      const totalEntities = await prisma.entity.count({
-        where: {
-          files: {
-            some: {},
-          },
-        },
-      });
+      const totalEntities = await prisma.entity.count({ where: { files: { some: {} } } });
 
-      res.status(200).json({
-        entities: entitiesWithFiles,
-        total: totalEntities,
-        page: parsedPage,
-        pageSize: parsedPageSize,
-      });
+      return res.status(200).json({ entities: entitiesWithFiles, total: totalEntities, page: parsedPage, pageSize: parsedPageSize });
     } else if (entityId) {
       const entityWithFiles = await prisma.entity.findUnique({
         where: { id: Number(entityId) },
-        include: {
-          files: true,
-        },
+        include: { files: true },
       });
 
-      if (!entityWithFiles) {
-        res.status(404).json({ error: "Entity not found." });
-        return;
-      }
+      if (!entityWithFiles) return res.status(404).json({ error: "Entity not found." });
 
-      res.status(200).json({ entities: [entityWithFiles] });
+      return res.status(200).json({ entities: [entityWithFiles] });
     } else {
-      res.status(400).json({
-        error: "Invalid query parameter. Provide 'entityId' or use 'all'.",
-      });
+      return res.status(400).json({ error: "Provide 'entityId' or use 'all'." });
     }
   } catch (error) {
     console.error("Error fetching entities and files:", error);
-    res.status(500).json({ error: "Failed to fetch entities and files." });
+    return res.status(500).json({ error: "Failed to fetch files." });
   }
 });
 
-
+// Delete File Route
 adminRouter.get("/delete-file", async (req: Request, res: Response) => {
-  let result = deleteFileSchema.safeParse(req.query);
-  if (!result.success) {
-    res.status(400).json({
-      error: true,
-      message: result.error.errors[0].message
-    });
-    return;
-  }
   const { fileId } = req.query;
+  if (!fileId) return res.status(400).json({ error: "File ID is required." });
 
   try {
-    if (!fileId) {
-      res.status(400).json({ error: "File ID is required." });
-    }
-    let filePath = "";
-    const file = await prisma.file.findUnique({
-      where: { id: Number(fileId) },
-    });
+    const file = await prisma.file.findUnique({ where: { id: Number(fileId) } });
+    if (!file) return res.status(404).json({ error: "File not found." });
 
-    if (!file) {
-      res.status(404).json({ error: "File not found." });
-    } else {
-      filePath = path.join(__dirname, "../", file.path);
-    }
-
-    try {
-      fs.unlinkSync(filePath);
-    } catch (deleteError) {
-      console.error("Error deleting file from disk:", deleteError);
-      res.status(500).json({ error: "Failed to delete the file from the server." });
-    }
+    const filePath = file.path; // Path is already saved with absolute location
+    deleteUploadedFile(filePath);
 
     await prisma.file.delete({ where: { id: Number(fileId) } });
 
-    res.status(200).json({ message: "File deleted successfully." });
+    return res.status(200).json({ message: "File deleted successfully." });
   } catch (error) {
     console.error("Error deleting file:", error);
-    res.status(500).json({ error: "Failed to delete the file." });
+    return res.status(500).json({ error: "Failed to delete file." });
   }
 });
 
