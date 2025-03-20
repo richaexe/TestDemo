@@ -1,341 +1,443 @@
-import React, { useEffect, useState, useCallback, useMemo, memo } from "react";
-import { useNavigate, useLocation } from "react-router-dom";
-import Pagination from "../pagination/pagination";
-import "../../css/pagination.css";
-import "../../css/home.css";
-import axios from "axios";
-import { apiRequest } from "../axios/apiRequest";
-import AnimatedHeader from "./animatedNotification";
-import LoadingOverlay from "../loading/loader";
-import ToastNotification from "../../helpers/ToastNotification";
+// useDissemination.jsx
+import { useState, useCallback, useRef, useEffect } from 'react';
+import { DISSEMINATION_URL, columnTitles } from  '../../../constants/dissemination';
+import { processExcelData, formatFieldValue, cleanFieldName, debounce } from './disseminationUtils';
+import { apiFormRequest } from '../../axios/apiFormRequest';
 
-// ** @@Refer [work item: 302] on azure board for visual represenation of home page implementation **
-
-// child memo 
-const CircularRow = memo(({ circular, showToast }) => {
-  const navigate = useNavigate();
-  const location = useLocation();
-  const [isExpanded, setIsExpanded] = useState(false);
-  // useCallback (bcz : call it when the circular changes not on every re-render)
-  const handleShowFile = useCallback(async () => {
-    try {
-      const response = await axios.get(
-        `${process.env.REACT_APP_BACKEND_URL}/api/user/circular/attachment/${circular.attachment}`,
-        { responseType: "blob" }
-      );
-      const fileBlob = new Blob([response.data], {
-        type: response.headers["content-type"],
-      });
-      const fileURL = URL.createObjectURL(fileBlob);
-      window.open(fileURL, "_blank");
-    } catch (error) {
-      showToast("Error loading file", "error");
-    }
-  }, [circular.attachment, showToast]);
-
-  const handleNavigation = useCallback(() => {
-    navigate("/Dissemination", {
-      state: {
-        circular: circular,
-        previousPath: location.pathname,
-      },
-    });
-  }, [circular, location.pathname, navigate]);
-
-  const toggleReadMore = () => {
-    setIsExpanded(!isExpanded);
-  };
-
-  return (
-    <tr>
-      <td>{circular.Circular.id}</td>
-      <td>{circular.Circular.circularReference}</td>
-      <td>{circular.Circular.circularTitle}</td>
-      <td>
-        {isExpanded
-          ? circular.applicability
-          : `${circular.applicability.substring(0, 80)}...`}
-        <button
-          className="read-more-button"
-          onClick={toggleReadMore}
-        >
-          {isExpanded ? "Read Less" : "Read More"}
-        </button>
-      </td>
-
-      <td>
-        {new Date(circular.Circular.circularDate).toLocaleDateString(
-          "en-GB",
-          {
-            day: "2-digit",
-            month: "2-digit",
-            year: "numeric",
-          }
-        )}
-      </td>
-      <td>
-        <button className="home-fetch-button" onClick={handleShowFile}>
-          Show
-        </button>
-      </td>
-      <td>
-        <button className="home-fetch-button" onClick={handleNavigation}>
-          Show
-        </button>
-      </td>
-    </tr>
-  );
-});
-
-// parent memo 
-const CircularsTable = memo(({ title, circulars, pagination, onPageChange, isLoading, showToast }) => {
-  if (!circulars || circulars.length === 0) return null;
-
-  const { currentPage, totalPages } = pagination;
-
-  //caLculated visible pages using the same logic as usePagination hook
-  const pageDisplayLimit = 5;
-  const startPage = Math.max(1, Math.min(
-    currentPage - Math.floor(pageDisplayLimit / 2),
-    totalPages - pageDisplayLimit + 1
-  ));
-
-  const visiblePages = Array.from(
-    { length: Math.min(pageDisplayLimit, totalPages - startPage + 1) },
-    (_, i) => startPage + i
-  );
-
-  return (
-    <div className="">
-      <h2 className="section-title" style={{ fontWeight: "bold" }}>
-        {title} {isLoading && <LoadingOverlay />}
-      </h2>
-      <div className="home-page-table-container">
-        <table className="home-page-table">
-          <thead>
-            <tr>
-              <th>S.No.</th>
-              <th>Reference Number</th>
-              <th>Subject</th>
-              <th>Applicability</th>
-              <th>Date of Issue</th>
-              <th>Show Circular</th>
-              <th>Show Dissemination</th>
-            </tr>
-          </thead>
-          <tbody>
-            {circulars.map((circular, index) => (
-              <CircularRow
-                key={`${circular.id}-${index}`}
-                circular={circular}
-                showToast={showToast}
-              />
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <Pagination
-        currentPage={currentPage}
-        totalPages={totalPages}
-        paginate={onPageChange}
-        nextPages={() => onPageChange(Math.min(currentPage + 1, totalPages))}
-        prevPages={() => onPageChange(Math.max(currentPage - 1, 1))}
-        visiblePages={visiblePages}
-        startPage={startPage}
-      />
-    </div>
-  );
-});
-
-const Home = () => {
-  const location = useLocation();
-  const [circularsData, setCircularsData] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [regulators, setRegulators] = useState([]);
-  const [paginationState, setPaginationState] = useState({});
-
-  // Toast notification state
-  const [toastState, setToastState] = useState({
+export const useDissemination = (fileInputRef) => {
+  const [disseminations, setDisseminations] = useState([]);
+  const [notification, setNotification] = useState({
     isOpen: false,
-    message: '',
-    type: 'success'
+    type: 'success',
+    message: ''
   });
+  const [fixedFields, setFixedFields] = useState({});
+  const [regulatorOptions, setRegulatorOptions] = useState([
+    { value: "", label: "Select" },
+    { value: "Custom", label: "Custom" }
+  ]);
+  const [loading, setLoading] = useState(false);
+  const [attachmentFiles, setAttachmentFiles] = useState({});
+  const [validationErrors, setValidationErrors] = useState([]);
+  
+  // Create a ref to store the debounced search function
+  const debouncedSearchRef = useRef(null);
 
-  // for loading the state of a particular regulator
-  const [loadingRegulator, setLoadingRegulator] = useState(null);
+  // Setup the debounced search function
+  useEffect(() => {
+    // Create a new debounced function and store it in the ref
+    debouncedSearchRef.current = debounce(async (index, field, value) => {
+      setDisseminations(prev => {
+        const updated = [...prev];
+        updated[index] = {
+          ...updated[index],
+          [field]: value,
+          searchedResult: updated[index].searchedResult || []
+        };
+        return updated;
+      });
 
-  // Function to show toast notifications
-  const showToast = useCallback((message, type = 'success') => {
-    setToastState({
-      isOpen: true,
-      message,
-      type
-    });
-  }, []);
+      if (value.length >= 2) {
+        try {
+          const response = await apiFormRequest(
+            "GET",
+            `${process.env.REACT_APP_BACKEND_URL}/api/user/circular/dissemination/linkedWithearlierCircular`,
+            { title: value }
+          );
 
-  // Function to close toast notification
-  const closeToast = useCallback(() => {
-    setToastState(prev => ({
-      ...prev,
-      isOpen: false
-    }));
-  }, []);
-
-  const formatRegulatorTitle = useCallback((regulator) => {
-    return regulator
-      .split("-")
-      .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-      .join(" ");
-  }, []);
-
-  // only re-render when path changes : [/home , /home/rejected] ) and 
-  // this fetchData btn tracks pagination seperately for different regulators
-  const fetchData = useCallback(async (regulatorToUpdate = null, page = 1, pageSize = 5) => {
-    if (regulatorToUpdate) {
-      setLoadingRegulator(regulatorToUpdate);
-    } else {
-      setLoading(true);
-    }
-    try {
-      setLoading(regulatorToUpdate ? false : true);
-      const isRejectedRoute = location.pathname === "/home/rejected";
-
-      let url = `${process.env.REACT_APP_BACKEND_URL}/api/user/home-data`;
-
-      const queryParams = [];
-
-      if (isRejectedRoute) {
-        queryParams.push('type=rejected');
-      }
-
-      queryParams.push(`page=${page}`);
-      queryParams.push(`pageSize=${pageSize}`);
-
-      // pushing the regulator that needs to be updated
-      if (regulatorToUpdate) {
-        queryParams.push(`regulator=${regulatorToUpdate}`);
-      }
-
-      //ADDDIng query parameters to URL
-      if (queryParams.length > 0) {
-        url += `?${queryParams.join('&')}`;
-      }
-
-      const response = await apiRequest("Get", url);
-
-      if (response.data.success) {
-        const { regulators: regulatorData, circulars: circularData, pagination } = response.data.data;
-
-        // handling init case : load all regulators
-        if (!regulatorToUpdate) {
-          const regulatorsList = regulatorData.map(reg => reg.value);
-          setRegulators(regulatorsList);
-          setCircularsData(circularData);
-        } else {
-          setCircularsData(prevCircularsData => {
-            // removing exisging circULAR that is not 
-            const filteredData = prevCircularsData.filter(
-              // we doing this bcz we only want to remove the regulator that needs to be updated (regulatorToUpdate)
-              // ex: regular to update is RBI , remove only the regulator with rbi.. 
-              circular => circular.Circular.regulator.toUpperCase() !== regulatorToUpdate.toUpperCase()
-            );
-
-            // merginG with not-removed (filteredData) and circularData (fetched from backend)  
-            return [...filteredData, ...circularData];
+          if (response.data && !response.data.error) {
+            setDisseminations(prev => {
+              const updated = [...prev];
+              updated[index] = {
+                ...updated[index],
+                searchedResult: response.data.data || []
+              };
+              return updated;
+            });
+          }
+        } catch (error) {
+          console.error('Search error:', error);
+          setDisseminations(prev => {
+            const updated = [...prev];
+            updated[index] = {
+              ...updated[index],
+              searchedResult: []
+            };
+            return updated;
           });
         }
-
-        setPaginationState(prevPagination => ({
-          ...prevPagination,
-          ...(pagination || {})
-        }));
+      } else {
+        setDisseminations(prev => {
+          const updated = [...prev];
+          updated[index] = {
+            ...updated[index],
+            searchedResult: []
+          };
+          return updated;
+        });
       }
+    }, 300);
 
-    } catch (error) {
-      console.error('Error fetching data:', error);
-      setError("Failed to fetch data.");
-      showToast("Failed to fetch data", "error");
-    } finally {
-      setLoadingRegulator(null);
-      setLoading(false);
+    // Cleanup function
+    return () => {
+      if (debouncedSearchRef.current && debouncedSearchRef.current.cancel) {
+        debouncedSearchRef.current.cancel();
+      }
+    };
+  }, []);
+
+  // Create a stable wrapper that calls the current debounced function
+  const handleSearchChange = useCallback((index, field, value) => {
+    if (debouncedSearchRef.current) {
+      debouncedSearchRef.current(index, field, value);
     }
-  }, [location.pathname, showToast]);
+  }, []);
 
-  useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+  const handleUploadFile = async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
 
-  // circularMap returns object [key : value pair]
-  const circularsMap = useMemo(() => {
-    if (!circularsData.length || !regulators.length) return {};
+    try {
+      const cleanData = await processExcelData(file);
+      
+      const fieldMapping = {
+        'Circular Reference': 'circularReference',
+        'Regulator': 'regulator',
+        'Circular Title': 'circularTitle',
+        'Circular Date': 'circularDate',
+        'Applicable': 'applicable',
+        'Regulator Sub Department': 'regulatorSubDepartment',
+        'Applicability': 'applicability',
+        'Financial Year': 'financialYear',
+        'Gist': 'gist',
+        'Policy to Update': 'policyToUpdate',
+        'Regulatory Timelines': 'regulatoryTimelines',
+        'Regulatory Deadline': 'regulatoryDeadline',
+        'Action Type': 'actionType',
+        'Circular Website Link': 'circularWebsiteLink',
+        'Linked to Earlier Circular': 'linkedToEarlierCircular',
+      };
 
-    const newCircularsMap = regulators.reduce((acc, regulator) => {
-      const filteredCirculars = circularsData.filter(
-        (circular) =>
-          circular.Circular.regulator.toUpperCase() === regulator.toUpperCase()
-      );
-      if (filteredCirculars.length > 0) {
-        acc[regulator] = filteredCirculars;
+      const mappedData = {
+        relatedCircularNumbers: [],
+        searchedResult: [],
+        searchTerm: "",
+        customRegulator: "",
+        linkedToEarlierCircular: "NO"  // Default value
+      };
+
+      // Handle regulator mapping
+      const regulatorRow = cleanData.find(row => cleanFieldName(row[0]) === 'Regulator');
+      if (regulatorRow && regulatorRow[1]) {
+        const regulatorValue = regulatorRow[1].toString().trim();
+        const regulatorExists = regulatorOptions.some(
+          option => option.value !== '' && option.value !== 'Custom' && 
+          option.value.toLowerCase() === regulatorValue.toLowerCase()
+        );
+
+        if (regulatorExists) {
+          mappedData.regulator = regulatorValue;
+        } else {
+          mappedData.regulator = regulatorValue;
+          mappedData.customRegulator = 'Custom';
+        }
       }
-      return acc;
-    }, {});
 
-    return newCircularsMap;
-  }, [circularsData, regulators]);
+      // Process other fields
+      cleanData.forEach(row => {
+        if (row.length >= 2) {
+          const excelField = cleanFieldName(row[0] || '');
+          const value = row[1]?.toString().trim();
+          const mappedField = fieldMapping[excelField];
 
-  if (loading) {
-    return <LoadingOverlay />;
-  }
+          if (mappedField && mappedField !== 'regulator') {
+            const formattedValue = formatFieldValue(mappedField, value);
+            mappedData[mappedField] = formattedValue;
 
-  if (error) {
-    return <div className="error-container">{error}</div>;
-  }
+            // If this is linkedToEarlierCircular, initialize the arrays based on the value
+            if (mappedField === 'linkedToEarlierCircular') {
+              if (formattedValue === 'YES') {
+                mappedData.relatedCircularNumbers = [];
+                mappedData.searchedResult = [];
+                mappedData.searchTerm = '';
+              }
+            }
+          }
+        }
+      });
 
-  const handlePageChange = (regulator, page) => {
-    fetchData(regulator, page);
+      setDisseminations(prev => [...prev, mappedData]);
+    } catch (error) {
+      console.error('Error processing file:', error);
+      // setError('Error processing the Excel file. Please check the format.');
+      setNotification({
+        isOpen: true,
+        type: 'error',
+        message: 'Error processing the Excel file. Please check the format.'
+      });
+    }
   };
 
-  return (
-    <div
-      className="container mx-auto px-4 py-6"
-      style={{
-        maxWidth: "100%",
-        transition: "width 0.3s, margin-left 0.3s",
-      }}
-    >
-      <AnimatedHeader showRejected={location.pathname === "/home/rejected"} />
+  const addNewRow = useCallback(() => {
+    setDisseminations(prev => [
+      ...prev,
+      {
+        ...columnTitles.reduce((acc, title) => {
+          if (title === 'applicable') {
+            acc[title] = '';
+          } else if (title === 'linkedToEarlierCircular') {
+            acc[title] = '';
+          } else if (title === 'regulatoryTimelines') {
+            acc[title] = '';
+          } else if (title === 'policyToUpdate') {
+            acc[title] = '';
+          } else if (title === 'actionType') {
+            acc[title] = '';
+          } else {
+            acc[title] = '';
+          }
+          return acc;
+        }, {}),
+        relatedCircularNumbers: [],
+        searchedResult: [],
+        searchTerm: "",
+        customRegulator: "",
+      }
+    ]);
+  }, []);
 
-      <div className="space-y-8">
-        {Object.entries(circularsMap).map(([regulator, circulars]) => (
-          <CircularsTable
-            key={regulator}
-            title={formatRegulatorTitle(regulator)}
-            circulars={circulars}
-            pagination={paginationState[regulator] || { currentPage: 1, totalPages: 1 }}
-            onPageChange={(page) => handlePageChange(regulator, page)}
-            isLoading={loadingRegulator === regulator}
-            showToast={showToast}
-          />
-        ))}
-        {Object.keys(circularsMap).length === 0 && (
-          <div className="text-center py-12 bg-gray-50 rounded-lg">
-            <h3 className="text-xl text-gray-600">
-              No circulars available.
-            </h3>
-          </div>
-        )}
-      </div>
+  const resetEntries = useCallback(() => {
+    setDisseminations([]);
+    setAttachmentFiles({});
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+    // setNotification(null);
+  }, [fileInputRef]);
 
-      {/* Toast Notification Component */}
-      <ToastNotification
-        type={toastState.type}
-        message={toastState.message}
-        isOpen={toastState.isOpen}
-        onClose={closeToast}
-      />
-    </div>
-  );
+  const handleInputChange = useCallback((index, field, value) => {
+    setDisseminations(prev => {
+      const updated = [...prev];
+      
+      // Special handling for regulator fields
+      if (field === "regulator") {
+        updated[index] = {
+          ...updated[index],
+          regulator: value,
+          customRegulator: value === "Custom" ? "" : ""  // Reset customRegulator only when Custom is selected
+        };
+      } else if (field === "customRegulator") {
+        // When custom regulator value is entered, keep "Custom" selected in regulator dropdown
+        updated[index] = {
+          ...updated[index],
+          regulator: "Custom",  // Keep "Custom" selected
+          customRegulator: value  // Store the custom value
+        };
+      } else if (field === 'attachment' && value instanceof File) {
+        updated[index][field] = value;
+        setAttachmentFiles(prev => ({
+          ...prev,
+          [index]: value
+        }));
+      } else {
+        updated[index][field] = value;
+      }
+      
+      return updated;
+    });
+    setNotification(prev => ({ ...prev, isOpen: false }));
+
+    setValidationErrors(prev => {
+      const newErrors = [...prev];
+      const errorIndex = newErrors.findIndex(err => err?.index === index);
+      
+      if (errorIndex !== -1) {
+        // If there's an error object for this row
+        const errorObj = { ...newErrors[errorIndex] };
+        
+        if (errorObj.errors && errorObj.errors[field]) {
+          // Mark this field as fixed
+          setFixedFields(prev => ({
+            ...prev,
+            [`${index}-${field}`]: true
+          }));
+          
+          // Clear the error for this field
+          const updatedErrors = { ...errorObj.errors };
+          delete updatedErrors[field];
+          
+          // Update the errors array
+          if (Object.keys(updatedErrors).length === 0) {
+            // If no more errors for this row, remove the row from errors array
+            return newErrors.filter((_, i) => i !== errorIndex);
+          } else {
+            // Otherwise update the error object
+            newErrors[errorIndex] = {
+              ...errorObj,
+              errors: updatedErrors
+            };
+          }
+        }
+      }
+      
+      return newErrors;
+    });
+  }, []);
+
+  const getValidationClass = useCallback((index, field) => {
+    const errorRow = validationErrors.find(err => err?.index === index);
+    const hasError = errorRow?.errors && errorRow.errors[field];
+    const wasFixed = fixedFields[`${index}-${field}`];
+    
+    if (hasError) return 'upload_diss_field_invalid';
+    if (wasFixed) return 'upload_diss_field_fixed';
+    return '';
+  }, [validationErrors, fixedFields]);
+  
+  const getCellClass = useCallback((index, field) => {
+    const errorRow = validationErrors.find(err => err?.index === index);
+    const hasError = errorRow?.errors && errorRow.errors[field];
+    const wasFixed = fixedFields[`${index}-${field}`];
+    
+    if (hasError) return 'validation-error';
+    if (wasFixed) return 'validation-fixed';
+    return '';
+  }, [validationErrors, fixedFields]);
+
+  const handleSelectCircular = useCallback((index, circular) => {
+    setDisseminations(prev => {
+      const updated = [...prev];
+      const row = { ...updated[index] };
+      row.searchedResult = [];
+      const existing = row.relatedCircularNumbers || [];
+      row.relatedCircularNumbers = [...new Set([...existing, circular.id])];
+      row.searchTerm = "";
+      updated[index] = row;
+      return updated;
+    });
+  }, []);
+
+  const deleteRow = useCallback((rowIndex) => {
+    setDisseminations(prev => prev.filter((_, i) => i !== rowIndex));
+  }, []);
+
+  const handleSubmit = async () => {
+    setFixedFields({});
+    setValidationErrors([]);
+    let hasErrors = false;
+
+    const errorsArray = disseminations.map((row, index) => {
+    const errors = {};
+    
+    Object.keys(row).forEach((field) => {
+      if (field === 'regulatoryDeadline' && row.regulatoryTimelines !== 'Yes') return;
+      if (field === 'relatedCircularNumbers' && row.linkedToEarlierCircular !== 'Yes') return;
+      if (['searchedResult', 'searchTerm'].includes(field)) return;
+      
+      // Modified regulator validation
+      if (field === 'regulator') {
+        // For regulator field
+        if (row.regulator === 'Custom') {
+          // If regulator is Custom, check if customRegulator has a value
+          if (!row.customRegulator) {
+            errors.customRegulator = true;
+          }
+        } else if (!row.regulator || row.regulator === '') {
+          // If not Custom, check if regulator has a value
+          errors.regulator = true;
+        }
+        return;
+      }
+
+      // Skip validation for customRegulator as it's handled above
+      if (field === 'customRegulator') return;
+
+      // For all other fields
+      if (!row[field]) {
+        errors[field] = true;
+      }
+    });
+
+    if (Object.keys(errors).length > 0) {
+      hasErrors = true;
+      return { index, errors };
+    }
+    return null;
+  });
+
+  if (hasErrors) {
+    setValidationErrors(errorsArray.filter(Boolean));
+    setNotification({
+      isOpen: true,
+      type: 'warning',
+      message: 'Please fill in all required fields correctly.'
+    });
+    return;
+  }
+
+  try {
+    setLoading(true);
+    const transformedDisseminations = disseminations.map(row => {
+      const transformedRow = { ...row };
+      // No need to transform regulator data as it's already in the correct format
+      return transformedRow;
+    });
+
+    const formData = new FormData();
+    formData.append('disseminations', JSON.stringify(transformedDisseminations));
+    
+    // Add attachments
+    Object.entries(attachmentFiles).forEach(([_, file]) => {
+      formData.append(`attachments`, file);
+    });
+
+    const response = await apiFormRequest('POST', DISSEMINATION_URL, formData);
+    
+    if (response.data.success) {
+      // using to replace alerts 
+      setNotification({
+        isOpen: true,
+        type: 'success',
+        message: 'Data submitted successfully!'
+      });
+      resetEntries();
+      // resetEntries();
+    } else {
+      throw new Error(response.data.message || 'Failed to submit data');
+    }
+  } catch (err) {
+    const errorMessage = err.response?.data?.message || err.message || "Error submitting data.";
+    // setError(errorMessage);
+    // alert(errorMessage);
+    setNotification({
+      isOpen: true,
+      type: 'error',
+      message: errorMessage
+    });
+  } finally {
+    setLoading(false);
+  }
 };
 
-export default Home;
+  return {
+    disseminations,
+    fixedFields,
+    getValidationClass,
+    getCellClass,
+    regulatorOptions,
+    setRegulatorOptions,
+    loading,
+    notification,
+    setNotification,
+    validationErrors,
+    attachmentFiles,
+    handleUploadFile,
+    addNewRow,
+    resetEntries,
+    handleInputChange,
+    handleSearchChange,
+    handleSelectCircular,
+    deleteRow,
+    handleSubmit,
+  };
+};
