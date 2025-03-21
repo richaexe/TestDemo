@@ -1,27 +1,70 @@
-export const getCircularAttachment = async (
-  req: customRequest,
-  res: Response,
-  next: NextFunction
-): Promise<void> => {
-  const transactionId = req.headers["transaction-id"] || "N/A";
-  logger.info(`Get Circular Attachment request received`, { transactionId });
+server {
+    listen 80;
+    server_name uat-athenaguard.wcgt.in;
 
-  try {
-    const { filename } = req.params;
-    const defaultUploadsDir = "/var/www/uploads"; // Ensure this is the correct directory
-    const filePath = path.join(process.env.UPLOADS_DIR || defaultUploadsDir, filename);
-
-    logger.info(`File path resolved: ${filePath}`, { transactionId });
-
-    if (fs.existsSync(filePath)) {
-      logger.info(`File found and sent: ${filename}`, { transactionId });
-      res.sendFile(filePath);
-    } else {
-      logger.error(`Attachment not found: ${filename}`, { transactionId });
-      res.status(404).json({ error: true, msg: "Attachment not found" });
+    location / {
+        return 301 https://$host$request_uri;
     }
-  } catch (error: any) {
-    logger.error(`Error in getCircularAttachment: ${error.message}`, { transactionId });
-    next(error);
-  }
-};
+}
+
+server {
+    listen 443 ssl;
+    server_name uat-athenaguard.wcgt.in;
+
+    ssl_certificate /etc/ssl/certs/nginx-selfsigned.crt;
+    ssl_certificate_key /etc/ssl/private/nginx-selfsigned.key;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+
+    location / {
+        root /var/www/frontend;
+        index index.html;
+        try_files $uri /index.html;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+    }
+
+    location /static/ {
+        alias /var/www/frontend/static/;
+        autoindex off;
+    }
+
+    location /api {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+    }
+
+    # ✅ Directly serve files from /var/www/uploads
+    location /uploads/ {
+        root /var/www;
+        autoindex off;
+        types {
+            application/pdf pdf;
+            application/vnd.ms-powerpoint ppt;
+            application/vnd.openxmlformats-officedocument.presentationml.presentation pptx;
+        }
+        expires max;
+        add_header Cache-Control "public, no-transform";
+    }
+
+    # Proxy for scrapper service
+    location /scrapper/ {
+        proxy_pass http://127.0.0.1:5000/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_cache_bypass $http_upgrade;
+    }
+
+    # Error pages (optional)
+    error_page 404 /index.html;
+    location = /404.html {
+        root /var/www/frontend;
+    }
+}
