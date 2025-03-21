@@ -1,7 +1,7 @@
 server {
     listen 80;
     server_name uat-athenaguard.wcgt.in;
-
+    
     location / {
         return 301 https://$host$request_uri;
     }
@@ -17,6 +17,7 @@ server {
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers HIGH:!aNULL:!MD5;
 
+    # Frontend serving
     location / {
         root /var/www/frontend;
         index index.html;
@@ -32,6 +33,7 @@ server {
         autoindex off;
     }
 
+    # Backend API proxy
     location /api {
         proxy_pass http://127.0.0.1:3000;
         proxy_set_header Upgrade $http_upgrade;
@@ -40,17 +42,10 @@ server {
         proxy_cache_bypass $http_upgrade;
     }
 
-    # ✅ Directly serve files from /var/www/uploads
-    location /uploads/ {
-        root /var/www;
+    # Fix for serving files from /var/www/uploads/
+    location /var/www/uploads/ {
+        alias /var/www/uploads/;
         autoindex off;
-        types {
-            application/pdf pdf;
-            application/vnd.ms-powerpoint ppt;
-            application/vnd.openxmlformats-officedocument.presentationml.presentation pptx;
-        }
-        expires max;
-        add_header Cache-Control "public, no-transform";
     }
 
     # Proxy for scrapper service
@@ -62,7 +57,7 @@ server {
         proxy_cache_bypass $http_upgrade;
     }
 
-    # Error pages (optional)
+    # Error pages
     error_page 404 /index.html;
     location = /404.html {
         root /var/www/frontend;
